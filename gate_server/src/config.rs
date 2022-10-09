@@ -4,14 +4,14 @@ use serde::Deserialize;
 
 
 #[derive(Debug, Deserialize, PartialEq)]
-struct GroupConfig {
+pub struct GroupConfig {
   ip: Ipv4Addr,
   port: u16,
   ping_duration: u16
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
-struct ClientConfig {
+pub struct ClientConfig {
   ip: Ipv4Addr,
   port: u16,
   ping_duration: u16,
@@ -23,7 +23,7 @@ struct ClientConfig {
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
-struct GameServerConfig {
+pub struct GameServerConfig {
   ip: Ipv4Addr,
   port: u16,
   ping_duration: u16,
@@ -31,9 +31,18 @@ struct GameServerConfig {
 
 #[derive(Debug, Deserialize, PartialEq)]
 pub struct GateServerConfig {
-  group_config: GroupConfig,
-  client_config: ClientConfig,
-  game_server_config: GameServerConfig,
+  pub group_config: GroupConfig,
+  pub client_config: ClientConfig,
+  pub game_server_config: GameServerConfig,
+}
+
+impl GateServerConfig {
+  pub fn get_server_ip_and_port(&self) -> (Ipv4Addr, u16) {
+    (
+      self.client_config.ip,
+      self.client_config.port
+    )
+  }
 }
 
 pub fn parse_config(path: &Path) -> GateServerConfig {
