@@ -1,10 +1,12 @@
+mod config;
+mod gate_server;
+
 use std::path::Path;
 
 use config::parse_config;
 
-mod config;
-
-fn main() {
-  let config = parse_config(Path::new("./config.yaml"));
-
+#[tokio::main]
+async fn main() {
+  let gate_server = gate_server::GateServer::start();
+  
 }
