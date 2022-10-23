@@ -1,4 +1,5 @@
 mod packets;
+mod parser;
 
 use byteorder::{BigEndian, ByteOrder, LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -105,12 +106,8 @@ mod test {
     use serde::{Serialize, Deserialize};
 
   fn get_test_packet() -> Vec<u8> {
-    let input = "0068";
-    let decoded = hex::decode(input).unwrap();
-    println!("{:?}", decoded);
     vec![
-      0, 40, 128, 0, 0, 0, 5, 234, 0, 7, 107, 105, 108, 108, 116, 49, 0, 0, 6, 76, 111, 99,
-      97, 108, 0, 0, 2, 97, 0, 99, 0, 0, 13, 67, 1, 57, 41, 112, 0, 1
+      0, 104, 128, 0, 0, 0
     ]
   }
 
@@ -137,20 +134,6 @@ use super::*;
 
   #[test]
   fn it_creates_a_packet_from_bytes() {
-    let data = get_test_packet();
-    
-    #[derive(Debug, Serialize, Deserialize)]
-    struct TestPacket {
-      length: u16,
-      header: u32
-    }
-    let decoder = bincode::DefaultOptions::new().allow_trailing_bytes();
-    let header_and_size = &data[0..6];
-    let rest_of_the_data = &data[6..];
-    println!("Packet data - {:?}, {:?}", header_and_size, rest_of_the_data);
-    let decoded: TestPacket = decoder.deserialize(header_and_size).unwrap();
-    println!("Decoded - {:?}", decoded);
-
   }
 
 //   #[test]
