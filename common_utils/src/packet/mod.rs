@@ -106,9 +106,8 @@ mod test {
     use serde::{Serialize, Deserialize};
 
   fn get_test_packet() -> Vec<u8> {
-    vec![
-      0, 104, 128, 0, 0, 0
-    ]
+    let packet_as_bytes = hex::decode("00628000000001af0000000000076e6f62696c6c00000850657273657573000018310aa7558bb275f80af0ba13cfb17a262dad39e710bf7adb0021303030303030303030303030303030313030413037353230453443323333394400039400887d2c");
+    packet_as_bytes.unwrap()
   }
 
   #[test]
