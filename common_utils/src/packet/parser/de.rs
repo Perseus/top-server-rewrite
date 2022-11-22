@@ -156,84 +156,84 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         visitor.visit_f32(f32::from_be_bytes(bytes))
     }
 
-    fn deserialize_f64<V>(self, visitor: V) -> Result<V::Value>
+    fn deserialize_f64<V>(self, _: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
         unimplemented!()
     }
 
-    fn deserialize_i128<V>(self, visitor: V) -> Result<V::Value>
+    fn deserialize_i128<V>(self, _: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
         unimplemented!()
     }
 
-    fn deserialize_i16<V>(self, visitor: V) -> Result<V::Value>
+    fn deserialize_i16<V>(self, _: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
         unimplemented!()
     }
 
-    fn deserialize_i32<V>(self, visitor: V) -> Result<V::Value>
+    fn deserialize_i32<V>(self, _: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
         unimplemented!()
     }
 
-    fn deserialize_i64<V>(self, visitor: V) -> Result<V::Value>
+    fn deserialize_i64<V>(self, _: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
         unimplemented!()
     }
 
-    fn deserialize_i8<V>(self, visitor: V) -> Result<V::Value>
+    fn deserialize_i8<V>(self, _: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
         unimplemented!()
     }
 
-    fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value>
+    fn deserialize_identifier<V>(self, _: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
         unimplemented!()
     }
 
-    fn deserialize_ignored_any<V>(self, visitor: V) -> Result<V::Value>
+    fn deserialize_ignored_any<V>(self, _: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
         unimplemented!()
     }
 
-    fn deserialize_map<V>(self, visitor: V) -> Result<V::Value>
+    fn deserialize_map<V>(self, _: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
         unimplemented!()
     }
 
-    fn deserialize_newtype_struct<V>(self, name: &'static str, visitor: V) -> Result<V::Value>
+    fn deserialize_newtype_struct<V>(self, _: &'static str, _: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
         unimplemented!()
     }
 
-    fn deserialize_option<V>(self, visitor: V) -> Result<V::Value>
+    fn deserialize_option<V>(self, _: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
         unimplemented!()
     }
 
-    fn deserialize_seq<V>(self, visitor: V) -> Result<V::Value>
+    fn deserialize_seq<V>(self, _: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {

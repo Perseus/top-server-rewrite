@@ -1,3 +1,3 @@
 mod error;
-mod ser;
-mod de;
+pub mod ser;
+pub mod de;

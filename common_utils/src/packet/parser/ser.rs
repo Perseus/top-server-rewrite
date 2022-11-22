@@ -131,7 +131,7 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     fn serialize_u16(self, v: u16) -> Result<Self::Ok> {
         let as_u8 = v.to_be_bytes();
         for byte in as_u8.iter() {
-            self.serialize_u8(*byte);
+            self.serialize_u8(*byte)?;
         }
 
         Ok(())
@@ -140,7 +140,7 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     fn serialize_u32(self, v: u32) -> Result<Self::Ok> {
         let as_u8 = v.to_be_bytes();
         for byte in as_u8.iter() {
-            self.serialize_u8(*byte);
+            self.serialize_u8(*byte)?;
         }
 
         Ok(())
@@ -149,7 +149,7 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     fn serialize_u64(self, v: u64) -> Result<Self::Ok> {
         let as_u8 = v.to_be_bytes();
         for byte in as_u8.iter() {
-            self.serialize_u8(*byte);
+            self.serialize_u8(*byte)?;
         }
 
         Ok(())
@@ -158,7 +158,7 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     fn serialize_u128(self, v: u128) -> Result<Self::Ok> {
         let as_u8 = v.to_be_bytes();
         for byte in as_u8.iter() {
-            self.serialize_u8(*byte);
+            self.serialize_u8(*byte)?;
         }
 
         Ok(())
@@ -168,7 +168,7 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     where
         T: Serialize,
     {
-        value.serialize(self);
+        value.serialize(self)?;
         Ok(())
     }
 

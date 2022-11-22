@@ -101,9 +101,10 @@ impl<PacketType> Packet<PacketType> {
 
 #[cfg(test)]
 mod test {
-    use bincode::{Options, serialize};
-    use bytes::BytesMut;
-    use serde::{Serialize, Deserialize};
+  use bincode::{Options, serialize};
+  use bytes::BytesMut;
+  use serde::{Serialize, Deserialize};
+  use parser::{de::from_bytes};
 
   fn get_test_packet() -> Vec<u8> {
     let packet_as_bytes = hex::decode("00628000000001af0000000000076e6f62696c6c00000850657273657573000018310aa7558bb275f80af0ba13cfb17a262dad39e710bf7adb0021303030303030303030303030303030313030413037353230453443323333394400039400887d2c");
@@ -121,29 +122,18 @@ mod test {
 
   use crate::packet::packets::TestCommandPacket;
 
-use super::*;
+  use super::*;
 
-  fn get_test_packet_one() -> BytesMut {
-      let data = BytesMut::from_iter(vec![
-          0, 40, 128, 0, 0, 0, 5, 234, 0, 7, 107, 105, 108, 108, 116, 49, 0, 0, 6, 76, 111, 99,
-          97, 108, 0, 0, 2, 97, 0, 99, 0, 0, 13, 67, 1, 57, 41, 112, 0, 1,
-      ]);
-      data
-  }
 
   #[test]
   fn it_creates_a_packet_from_bytes() {
+      let data = get_test_packet();
+      let bytes_clone = data.clone();
+      let packet: Packet<TestCommandPacket> = from_bytes(&data).unwrap();
+
+      assert_eq!(packet.raw_data, bytes_clone);
+      assert_eq!(packet.size, 40);
   }
-
-//   #[test]
-//   fn it_creates_a_packet_from_bytes() {
-//       let data = get_test_packet_one();
-//       let bytes_clone = data.clone();
-//       let packet: Packet<TestCommandPacket> = Packet::from_bytes(TestCommandPacket {}, data);
-
-//       assert_eq!(packet.raw_data, bytes_clone);
-//       assert_eq!(packet.size, 40);
-//   }
 
 //   #[test]
 //   fn it_reads_a_command_correctly() {
