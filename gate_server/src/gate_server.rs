@@ -1,8 +1,13 @@
+use super::metrics::CONNECTIONS_COUNTER;
+
 use std::path::Path;
 use colored::Colorize;
 use tokio::{net::TcpListener, io::AsyncReadExt, io::AsyncWriteExt};
 
+
+
 use crate::config::{GateServerConfig, self};
+
 
 pub struct GateServer {
   config: GateServerConfig,
@@ -55,6 +60,7 @@ impl GateServer {
 
     loop {
       let (mut socket, _) = server.accept().await?;
+      CONNECTIONS_COUNTER.inc();
     }
 
   }
