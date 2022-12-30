@@ -11,8 +11,6 @@ use std::fmt::Write;
 use std::io::Cursor;
 use std::io::Error;
 
-use self::packets::TestCommandPacket;
-
 #[derive(PartialEq, Debug, TryFromPrimitive, Clone, IntoPrimitive)]
 #[repr(u16)]
 pub enum Command {
@@ -105,94 +103,25 @@ mod test {
   use bytes::BytesMut;
   use serde::{Serialize, Deserialize};
   use parser::{de::from_bytes};
+  use super::*;
 
   fn get_test_packet() -> Vec<u8> {
     let packet_as_bytes = hex::decode("00628000000001af0000000000076e6f62696c6c00000850657273657573000018310aa7558bb275f80af0ba13cfb17a262dad39e710bf7adb0021303030303030303030303030303030313030413037353230453443323333394400039400887d2c");
     packet_as_bytes.unwrap()
   }
 
-  #[test]
-  fn it_reads_the_packet_metadata_correctly() {
-    let data = get_test_packet();
+  #[derive(Deserialize)]
+  struct LoginPacket {
 
-
+    secret_key: u16,
+    client_version: u16
   }
-
-  use std::iter::FromIterator;
-
-  use crate::packet::packets::TestCommandPacket;
-
-  use super::*;
-
 
   #[test]
   fn it_creates_a_packet_from_bytes() {
       let data = get_test_packet();
       let bytes_clone = data.clone();
-      let packet: Packet<TestCommandPacket> = from_bytes(&data).unwrap();
+      let packet: LoginPacket = from_bytes(&data).unwrap();
 
-      assert_eq!(packet.raw_data, bytes_clone);
-      assert_eq!(packet.size, 40);
   }
-
-//   #[test]
-//   fn it_reads_a_command_correctly() {
-//       let data = get_test_packet_one();
-//       let mut packet: Packet<TestCommandPacket> = Packet::from_bytes(TestCommandPacket {}, data);
-
-//       let command = packet.read_cmd().unwrap();
-//       assert_eq!(command, Command::TestCommand);
-//   }
-
-//   #[test]
-//   fn it_reads_strings_correctly() {
-//       let data = get_test_packet_one();
-//       let mut packet: Packet<TestCommandPacket> = Packet::from_bytes(TestCommandPacket {}, data);
-
-//       let _ = packet.read_cmd().unwrap();
-//       let char_name = packet.read_string().unwrap();
-//       let chat_channel = packet.read_string().unwrap();
-//       let chat_content = packet.read_string().unwrap();
-
-//       assert_eq!(char_name, "killt1");
-//       assert_eq!(chat_channel, "Local");
-//       assert_eq!(chat_content, "a");
-//   }
-
-//   #[test]
-//   fn it_reads_reverse_data_correctly() {
-//       let data = get_test_packet_one();
-//       let mut packet: Packet<TestCommandPacket> = Packet::from_bytes(TestCommandPacket {}, data);
-
-//       let last_char = packet.reverse_read_char().unwrap();
-//       assert_eq!(last_char, 1);
-
-//       let last_short = packet.reverse_read_short().unwrap();
-//       assert_eq!(last_short, 28672);
-//   }
-
-//   // #[test]
-//   // fn it_creates_an_empty_packet() {
-//   //     let packet = Packet::new();
-//   //     assert_eq!(packet.raw_data, BytesMut::new());
-//   // }
-
-//   // #[test]
-//   // fn it_builds_a_packet_correctly() {
-//   //     let mut w_packet = Packet::new();
-
-//   //     w_packet.write_cmd(Command::TestCommand).unwrap();
-//   //     w_packet.write_short(10).unwrap();
-//   //     w_packet.write_long(200).unwrap();
-//   //     w_packet.write_string("Hello").unwrap();
-//   //     w_packet.write_char('A' as u8).unwrap();
-//   //     w_packet.build_packet().unwrap();
-
-//   //     let mut r_packet = w_packet.duplicate();
-//   //     assert_eq!(r_packet.read_cmd().unwrap(), Command::TestCommand);
-//   //     assert_eq!(r_packet.read_short().unwrap(), 10);
-//   //     assert_eq!(r_packet.read_long().unwrap(), 200);
-//   //     assert_eq!(r_packet.read_string().unwrap(), "Hello");
-//   //     assert_eq!(r_packet.read_char().unwrap(), 'A' as u8);
-//   // }
 }
