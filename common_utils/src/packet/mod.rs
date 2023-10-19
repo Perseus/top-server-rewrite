@@ -106,13 +106,39 @@ mod test {
   use super::*;
 
   fn get_test_packet() -> Vec<u8> {
-    let packet_as_bytes = hex::decode("00628000000001af0000000000076e6f62696c6c00000850657273657573000018310aa7558bb275f80af0ba13cfb17a262dad39e710bf7adb0021303030303030303030303030303030313030413037353230453443323333394400039400887d2c");
+    let packet_as_bytes = hex::decode("020000004500008831714000800600007f0000017f000001c42507b5f43d914c62c3d4a65018ffb8b6ac000000608000000001af0000000000076e6f62696c6c00000661646d696e000018dbe3d3bc096401abde005ccf5dc062c642a3d8b12d0f04930021303030303030303030303030303031304130373532453443323333394400039400887d2c");
     packet_as_bytes.unwrap()
   }
 
-  #[derive(Deserialize)]
-  struct LoginPacket {
 
+  /**
+   * Login packet structure
+   0000   02 00 00 00 45 00 00 88 31 71 40 00 80 06 00 00
+  0010   7f 00 00 01 7f 00 00 01 c4 25 07 b5 f4 3d 91 4c
+  0020   62 c3 d4 a6 50 18 ff b8 b6 ac 00 00 00 60 80 00
+  0030   00 00 01 af 00 00 00 00 00 07 6e 6f 62 69 6c 6c
+  0040   00 00 06 61 64 6d 69 6e 00 00 18 db e3 d3 bc 09
+  0050   64 01 ab de 00 5c cf 5d c0 62 c6 42 a3 d8 b1 2d
+  0060   0f 04 93 00 21 30 30 30 30 30 30 30 30 30 30 30
+  0070   30 30 30 30 31 30 30 41 30 37 35 32 30 45 34 43
+  0080   32 33 33 39 44 00 03 94 00 88 7d 2c
+
+
+   * - Command (u16)
+   * - "passport" (string)
+   * - Account Name (string)
+   * - Password (encrypted string - custom encryption algo?)
+   * - Mac Address (full mac or 'unknown' if not found)
+   * - Secret Key
+   * - Client Version
+   */
+  #[derive(Deserialize, Debug)]
+  struct LoginPacket {
+    cmd: u16,
+    passport: String,
+    account_name: String,
+    password: String,
+    mac_address: String,
     secret_key: u16,
     client_version: u16
   }
@@ -122,6 +148,8 @@ mod test {
       let data = get_test_packet();
       let bytes_clone = data.clone();
       let packet: LoginPacket = from_bytes(&data).unwrap();
+
+      println!("{:?}", packet);
 
   }
 }

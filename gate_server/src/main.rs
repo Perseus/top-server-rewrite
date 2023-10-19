@@ -2,6 +2,8 @@ mod config;
 mod gate_server;
 mod web_server;
 mod metrics;
+mod handlers;
+mod entities;
 
 use std::{path::Path, thread};
 
