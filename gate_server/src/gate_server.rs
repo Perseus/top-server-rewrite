@@ -1,4 +1,5 @@
 use super::metrics::CONNECTIONS_COUNTER;
+use super::handlers::client;
 
 use std::path::Path;
 use colored::Colorize;
@@ -6,7 +7,7 @@ use tokio::{net::TcpListener, io::AsyncReadExt, io::AsyncWriteExt};
 
 
 
-use crate::config::{GateServerConfig, self};
+use crate::{config::{GateServerConfig, self}, metrics::TOTAL_CONNECTIONS, handlers::client::Client};
 
 
 pub struct GateServer {
@@ -52,6 +53,8 @@ impl GateServer {
     };
 
     self.server = Some(server);
+    println!("{} {}", "Running GateServer at port".green(), port.to_string().blue());
+
     Ok(())
   }
 
@@ -61,6 +64,14 @@ impl GateServer {
     loop {
       let (mut socket, _) = server.accept().await?;
       CONNECTIONS_COUNTER.inc();
+      TOTAL_CONNECTIONS.inc();
+      
+      tokio::spawn(async move {
+        let mut client = Client::new(socket);
+        client.start_receiving_data().await;
+      });
+
+      println!("Got connection");
     }
 
   }
