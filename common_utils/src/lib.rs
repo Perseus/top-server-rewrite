@@ -1,2 +1,3 @@
-pub mod parser;
+pub mod network;
 pub mod packet;
+pub mod parser;

@@ -4,7 +4,7 @@ client_config:
   max_connections: 500
   max_login_per_ip: 50
   ping_duration: 180
-  port: 3000
+  port: 1973
   wpe_protection: true
   wpe_version: 30
 
@@ -17,3 +17,4 @@ game_server_config:
   ip: "127.0.0.1"
   port: 3002
   ping_duration: 180
+

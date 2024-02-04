@@ -1,4 +1,4 @@
-use rouille::{Request, Response};
+use rouille::{Response};
 use super::metrics;
 
 pub fn start_webserver() {
