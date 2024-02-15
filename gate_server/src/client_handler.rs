@@ -1,10 +1,12 @@
+use std::sync::Arc;
+
 use common_utils::{
     network::{tcp_connection::TcpConnection, tcp_server::ServerHandler},
     packet::{
         commands::*, init::InitClientPacket, BasePacket, PacketReader, PacketWriter, TypedPacket,
     },
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 
 use crate::{
     gate_commands::GateCommands, gate_server::GateServer, metrics::CONNECTIONS_COUNTER,
@@ -29,7 +31,13 @@ impl ServerHandler<Player> for ClientHandler {
         stream: tokio::net::TcpStream,
         socket: std::net::SocketAddr,
     ) -> TcpConnection<Player> {
-        let mut tcp_connection = TcpConnection::<Player>::new(id, stream, socket);
+        let mut tcp_connection = TcpConnection::<Player>::new(
+            id.clone(),
+            stream,
+            socket,
+            format!("client.{}", id),
+            colored::Color::Blue,
+        );
 
         CONNECTIONS_COUNTER.inc();
 
@@ -40,17 +48,7 @@ impl ServerHandler<Player> for ClientHandler {
         tcp_connection
     }
 
-    fn on_connected(
-        mut connection: TcpConnection<Player>,
-    ) -> anyhow::Result<mpsc::Sender<BasePacket>> {
-        let application_context = connection.get_application_context();
-        if application_context.is_none() {
-            return Err(anyhow::anyhow!("No application context").context("on_connected"));
-        }
-
-        let chapstr = application_context.unwrap().get_chapstr();
-        let client_init_packet = InitClientPacket::new(chapstr).to_base_packet().unwrap();
-
+    fn on_connected(client_connection: Arc<Mutex<TcpConnection<Player>>>) -> anyhow::Result<()> {
         // channel where we get data from the client (recv)
         // separate thread pulling data from the client TCP connection, where a thread consumes it, converts it into a BasePacket, and then pushes it to recv_tx, and can be consumed through recv_rx
         let (recv_tx, mut recv_rx) = mpsc::channel(100);
@@ -60,19 +58,28 @@ impl ServerHandler<Player> for ClientHandler {
         let (_send_tx, send_rx) = mpsc::channel(100);
         let channel_for_init_packet = _send_tx.clone();
 
-        // send init packet, required for client to send auth info
+        let _send_tx_for_processor = _send_tx.clone();
+
         tokio::spawn(async move {
+            let mut connection = client_connection.lock().await;
+
+            let application_context = connection.get_application_context();
+            if application_context.is_none() {
+                return Err(anyhow::anyhow!("No application context").context("on_connected"));
+            }
+
+            let chapstr = application_context.unwrap().get_chapstr();
+            let client_init_packet = InitClientPacket::new(chapstr).to_base_packet().unwrap();
             channel_for_init_packet
                 .send(client_init_packet)
                 .await
                 .unwrap();
-        });
 
-        let _send_tx_for_processor = _send_tx.clone();
-        tokio::spawn(async move {
             connection
                 .start_processing(recv_tx, send_rx, _send_tx_for_processor)
                 .await;
+
+            Ok(())
         });
 
         tokio::spawn(async move {
@@ -104,7 +111,7 @@ impl ServerHandler<Player> for ClientHandler {
             }
         });
 
-        return Ok(gate_comm_tx);
+        Ok(())
     }
 
     // fn on_disconnect(self) {
@@ -114,7 +121,7 @@ impl ServerHandler<Player> for ClientHandler {
 
     fn on_data(mut packet: BasePacket) {
         match packet.read_cmd() {
-            Some(Command::CTGt_Login) => {}
+            Some(Command::CTGTLogin) => {}
 
             _ => {
                 todo!()

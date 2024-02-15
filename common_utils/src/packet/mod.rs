@@ -15,7 +15,9 @@ use std::mem::size_of;
 
 use commands::*;
 
-const DEFAULT_HEADER: u32 = 2147483648;
+use crate::network::rpc::MAX_SESS_ID_VALUE;
+
+const DEFAULT_HEADER: u32 = 6;
 
 #[derive(Debug, PartialEq)]
 pub enum FrameError {
@@ -32,6 +34,7 @@ pub trait PacketReader {
     fn read_sequence(&mut self) -> Option<&[u8]>;
     fn read_string(&mut self) -> Option<String>;
     fn read_float(&mut self) -> Option<f32>;
+    fn read_session_id(&self) -> Option<u32>;
     fn reverse_read_char(&mut self) -> Option<u8>;
     fn reverse_read_short(&mut self) -> Option<u16>;
     fn reverse_read_long(&mut self) -> Option<u32>;
@@ -47,6 +50,7 @@ pub trait PacketWriter {
     fn write_sequence(&mut self, sequence: &[u8], len: u16) -> anyhow::Result<()>;
     fn write_string(&mut self, string: &str) -> anyhow::Result<()>;
     fn write_float(&mut self, data: f32) -> anyhow::Result<()>;
+    fn write_session_id(&mut self, session_id: u32) -> anyhow::Result<()>;
     fn build_packet(&mut self) -> anyhow::Result<()>;
 }
 
@@ -80,6 +84,9 @@ pub struct BasePacket {
     header: u32,
     reverse_offset: u8,
     tick_count: u64,
+    is_for_rpc: bool,
+    session_id: Option<u32>,
+    is_built: bool,
 }
 
 impl BasePacket {
@@ -93,6 +100,9 @@ impl BasePacket {
             header: DEFAULT_HEADER,
             reverse_offset: 0,
             tick_count: 0,
+            is_for_rpc: false,
+            session_id: None,
+            is_built: false,
         }
     }
 
@@ -105,25 +115,33 @@ impl BasePacket {
             header: 0,
             reverse_offset: 0,
             tick_count: 0,
+            is_for_rpc: false,
+            session_id: None,
+            is_built: false,
         };
 
         if let Some(size) = packet.read_short() {
             packet.size = size;
+        }
 
-            if let Some(header) = packet.read_long() {
-                packet.header = header;
+        if let Some(header) = packet.read_long() {
+            packet.header = header;
+            packet.session_id = Some(header);
+        }
 
-                if let Some(cmd) = packet.read_cmd() {
-                    packet.cmd = cmd;
-                }
-            }
+        if let Some(cmd) = packet.read_cmd() {
+            packet.cmd = cmd;
         }
 
         packet
     }
 
     pub fn as_bytes(self) -> BytesMut {
-        return self.data;
+        self.data
+    }
+
+    pub fn is_for_rpc(&self) -> bool {
+        self.is_for_rpc
     }
 
     pub fn get_len(&self) -> u16 {
@@ -139,6 +157,10 @@ impl BasePacket {
         let remaining_packet_len = self.data.len() - offset;
 
         remaining_packet_len
+    }
+
+    pub fn has_data(&self) -> bool {
+        self.data.len() > (2 + 4 + 2)
     }
 
     fn get_total_packet_len(&self) -> usize {
@@ -174,19 +196,13 @@ impl BasePacket {
         packet
     }
 
-    pub fn check_frame(buffer: &BytesMut) -> Result<usize, FrameError> {
+    pub fn check_frame(buffer: &BytesMut, could_be_rpc: bool) -> Result<usize, FrameError> {
         // if we don't have at least enough data for a "packet length" frame, we return false
         let packet_length = buffer
             .get(0..2)
             .ok_or(FrameError::Incomplete)?
             .read_u16::<BigEndian>()
             .map_err(|_| FrameError::Invalid)?;
-
-        println!(
-            "packet length found - {}, buffer remaining - {}",
-            packet_length,
-            buffer.remaining()
-        );
 
         if buffer.remaining() < (packet_length as usize - 2) {
             return Err(FrameError::Incomplete);
@@ -200,6 +216,15 @@ impl BasePacket {
     pub fn parse_frame(buffer: &mut BytesMut, len: usize) -> Result<Self, FrameError> {
         let final_buffer = BytesMut::from_iter(&buffer[0..len]);
         Ok(BasePacket::from_bytes(final_buffer))
+    }
+
+    pub fn inspect(&self) {
+        println!("------ Inspected Packet -------");
+        println!("[Packet] Size: {}", self.size);
+        println!("[Packet] Header: {:?}", self.data.get(2..6));
+        println!("[Packet] Command: {:?}", self.data.get(6..8));
+        println!("[Packet] Data: {:?}", self.data.get(8..self.size as usize));
+        println!("-------------------------------");
     }
 }
 
@@ -398,12 +423,29 @@ impl PacketReader for BasePacket {
 
         Some(data_to_return)
     }
+
+    fn read_session_id(&self) -> Option<u32> {
+        // 2 bytes for the size
+        let start_index = 2;
+
+        // the session id can be found in the first 4 bytes of the header
+        let end_index = 6;
+
+        let mut data = self.data.get(start_index..end_index)?;
+        if let Ok(mut session_id) = data.read_u32::<BigEndian>() {
+            if session_id > MAX_SESS_ID_VALUE {
+                session_id -= MAX_SESS_ID_VALUE;
+            }
+
+            return Some(session_id);
+        }
+
+        None
+    }
 }
 
 impl PacketWriter for BasePacket {
     fn write_buffer(&mut self, mut buffer: Vec<u8>) -> anyhow::Result<()> {
-        println!("buffer len is - {}, buffer is - {:?}", buffer.len(), buffer);
-
         for _ in 0..buffer.len() {
             if let Some(el) = buffer.pop() {
                 self.data.put_u8(el);
@@ -472,10 +514,9 @@ impl PacketWriter for BasePacket {
     fn write_sequence(&mut self, sequence: &[u8], len: u16) -> anyhow::Result<()> {
         let mut buf = Vec::with_capacity(len as usize);
 
-        println!("len - {}", len);
         self.write_short(len + 1)?;
 
-        buf.push('\0' as u8);
+        buf.push(b'\0');
 
         for i in 0..len as usize {
             if let Some(char) = sequence.get((len as usize) - i - 1) {
@@ -494,11 +535,26 @@ impl PacketWriter for BasePacket {
         Ok(())
     }
 
+    fn write_session_id(&mut self, session_id: u32) -> anyhow::Result<()> {
+        self.session_id = Some(session_id);
+
+        Ok(())
+    }
+
     fn build_packet(&mut self) -> anyhow::Result<()> {
+        if self.is_built {
+            // delete bytes 0..6 because header and size are already written
+            self.data = self.data.split_off(6);
+        }
         let size = (self.data.len() + 4 + 2) as u16; // total data + header + length of the size data itself
 
         let size_buf = size.to_be_bytes().to_vec();
-        let header_buf = self.header.to_be_bytes().to_vec();
+        let mut header_buf = self.header.to_be_bytes().to_vec();
+        // replace the first N bytes of the header with the session_id if it exists
+        if let Some(session_id) = self.session_id {
+            let session_id_buf = session_id.to_be_bytes().to_vec();
+            header_buf = session_id_buf;
+        }
 
         let full_buf = [size_buf, header_buf].concat();
 
@@ -509,6 +565,7 @@ impl PacketWriter for BasePacket {
         byte_buffer.unsplit(existing_data);
 
         self.data = byte_buffer;
+        self.is_built = true;
 
         Ok(())
     }

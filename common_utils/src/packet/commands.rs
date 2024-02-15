@@ -10,4 +10,8 @@ pub enum Command {
 
     // GateServer to Client
     GTTCEstablishConnection = 940,
+
+    // GateServer to GroupServer
+    GTTGPInit = 2001,
+    GTTGPSyncPlayerList = 2015,
 }

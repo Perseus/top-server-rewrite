@@ -1,7 +1,10 @@
 use chrono::{Datelike, Local, Timelike};
 
+#[derive(Debug)]
 pub struct Player {
     chapstr: String,
+    login_id: u32,
+    account_id: u32,
 }
 
 impl Player {
@@ -17,10 +20,22 @@ impl Player {
             current_time.timestamp_subsec_millis()
         );
 
-        Player { chapstr }
+        Player {
+            chapstr,
+            login_id: 0,
+            account_id: 0,
+        }
     }
 
     pub fn get_chapstr(&self) -> String {
         self.chapstr.clone()
+    }
+
+    pub fn get_login_id(&self) -> u32 {
+        self.login_id
+    }
+
+    pub fn get_account_id(&self) -> u32 {
+        self.account_id
     }
 }

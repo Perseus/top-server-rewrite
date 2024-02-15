@@ -9,8 +9,8 @@ client_config:
   wpe_version: 30
 
 group_config:
-  ip: "127.0.0.1"
-  port: 3001
+  ip: "172.24.80.1"
+  port: 1975 
   ping_duration: 180
 
 game_server_config:
