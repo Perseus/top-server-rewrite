@@ -12,18 +12,22 @@ use std::{
     time::Duration,
 };
 use tokio::{
+    net::TcpStream,
     sync::*,
     task::{JoinHandle, JoinSet},
     time::sleep,
 };
 
 use crate::{
-    client_handler::ClientHandler,
+    client_handler::{ClientGateCommands, ClientHandler},
     config::{self, GateServerConfig},
     group_server::GroupServer,
     groupserver_handler::{GateGroupCommands, GroupServerHandler},
     player::Player,
 };
+
+// TODO: figure out how to set this from config at runtime
+pub const SUPPORTED_CLIENT_VERSION: u16 = 136;
 
 /**
  * This maps an ever-growing counter that acts as the player's internal (in-memory) ID to the
@@ -48,7 +52,7 @@ pub struct GateServer {
     // other services store U32 as the player's "gate address" which is required to communicate to
     // specific players directly
     player_num_counter: Arc<AtomicU32>,
-    group_conn: Option<Arc<Mutex<TcpConnection<GroupServer>>>>,
+    group_handler: Option<Arc<RwLock<GroupServerHandler>>>,
 }
 
 impl GateServer {
@@ -64,9 +68,9 @@ impl GateServer {
 
         GateServer {
             config,
-            player_num_counter: Arc::new(AtomicU32::new(0)),
+            player_num_counter: Arc::new(AtomicU32::new(1)),
             client_connections: Arc::new(RwLock::new(HashMap::new())),
-            group_conn: None,
+            group_handler: None,
         }
     }
 
@@ -85,21 +89,37 @@ impl GateServer {
         println!("{}", r"------------------------------------------------------------------------------------------------------------------------".green());
     }
 
+    /**
+     * Register a new client connection with the GateServer
+     */
     async fn register_client_connection(
         client_conn_map: PlayerConnectionMap,
         player_counter: Arc<AtomicU32>,
-        connection: TcpConnection<Player>,
+        stream: TcpStream,
+        groupserver_handler: Arc<RwLock<GroupServerHandler>>,
+        client_to_gate_tx: mpsc::Sender<ClientGateCommands>,
     ) {
         let mut map = client_conn_map.write().await;
+        // relaxed ordering is fine, this is just to give a unique ID to the player
+        // there aren't any other
         let id = player_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let socket_addr = stream.peer_addr().unwrap();
+        let handler = ClientHandler::on_connect(id, "Client".to_string(), stream, socket_addr);
+
+        {
+            let handler = handler.clone();
+            let mut handler = handler.write().await;
+            handler.set_groupserver_handler_ref(groupserver_handler);
+        }
+
+        let connection = handler.read().await.get_connection().clone();
 
         // TODO: handle the cases where
         // 1. the counter overflows (unlikely to happen in normal conditions, but if we get a DoS, it can happen)
-        let inserted = map.insert(id.clone(), Arc::new(Mutex::new(connection)));
-
+        let inserted = map.insert(id.clone(), connection);
         let connection = map.get(&id).unwrap();
 
-        if let Ok(()) = ClientHandler::on_connected(connection.clone()) {
+        if let Ok(()) = ClientHandler::on_connected(handler, client_to_gate_tx).await {
             println!(
                 "{} {}",
                 "Client connection registered with id".green(),
@@ -114,17 +134,34 @@ impl GateServer {
         }
     }
 
+    /**
+     * Start a TCP server which listens for incoming connections from
+     * game clients
+     */
     async fn start_client_connection_handler(&mut self) -> JoinHandle<()> {
         let (ip, port) = self.config.get_server_ip_and_port_for_client();
         let connect_addr = format!("{}:{}", ip, port);
 
-        let (client_comm_channel_tracker_tx, mut client_comm_channel_tracker_rx) =
-            tokio::sync::mpsc::channel::<(String, TcpConnection<Player>)>(100);
+        /*
+         * This channel will allow us to receive the TcpStreams that get created when an incoming
+         * connection from the client is established.
+         *
+         * We want to "own" the TcpStreams/connections as part of the GateServer, and since we are
+         * offloading the handling of the connections to a separate task, we need a way to get this data back
+         *
+         * I would've liked to use something like a generator here, but I don't think that's possible
+         * in the way that things are currently done.
+         *
+         * Another way is to use stream iterators, but from the Tokio docs, the way to do it is pretty much
+         * the same as what I'm doing here, so I'm not sure if it's worth it.
+         */
+        let (tcp_stream_tx, mut tcp_stream_rx) = tokio::sync::mpsc::channel::<TcpStream>(100);
 
+        /*
+         * Start the TCP server, hand it off to a separate task
+         */
         tokio::spawn(async move {
-            TcpServer::start::<ClientHandler, Player>(connect_addr, client_comm_channel_tracker_tx)
-                .await
-                .unwrap();
+            TcpServer::start(connect_addr, tcp_stream_tx).await.unwrap();
         });
 
         let client_tcp_connections = self.client_connections.clone();
@@ -136,33 +173,67 @@ impl GateServer {
         );
 
         let player_counter = self.player_num_counter.clone();
+        let groupserver_handler = self.group_handler.clone().unwrap();
+        let (client_to_gate_tx, mut client_to_gate_rx) = mpsc::channel::<ClientGateCommands>(100);
+        let client_tcp_connections_for_client_commands_handler = client_tcp_connections.clone();
 
         tokio::spawn(async move {
+            let client_tcp_connections = client_tcp_connections_for_client_commands_handler;
+            while let Some(command) = client_to_gate_rx.recv().await {
+                match command {
+                    ClientGateCommands::Disconnect(id) => {
+                        let mut map = client_tcp_connections.write().await;
+                        if let Some(connection) = map.remove(&id) {
+                            let mut connection = connection.lock().await;
+                            connection.close(Duration::ZERO).await;
+                        }
+                    }
+                }
+            }
+        });
+        /*
+         * The only thing that needs to be mutated when a new client conencts
+         * is the client_connections map, so we wrap it in a Arc<RwLock<>> to allow
+         * for concurrent access and then pass it to this task, which can call
+         * a static method on GateServer so that the logic remains in the same module
+         */
+        tokio::spawn(async move {
             let player_counter = player_counter;
-            while let Some((_, player_connection)) = client_comm_channel_tracker_rx.recv().await {
+            let groupserver_handler = groupserver_handler;
+            while let Some(stream) = tcp_stream_rx.recv().await {
                 GateServer::register_client_connection(
                     client_tcp_connections.clone(),
                     player_counter.clone(),
-                    player_connection,
+                    stream,
+                    groupserver_handler.clone(),
+                    client_to_gate_tx.clone(),
                 )
                 .await;
             }
         })
     }
 
+    /**
+     * Establishes a connection with the GroupServer
+     */
     async fn start_group_server_connection_handler(&mut self) {
         let (ip, port) = self.config.get_server_ip_and_port_for_group_server();
         let connect_addr = format!("{}:{}", ip, port);
 
-        let mut group_server_client = TcpClient::new("GroupServer".to_string(), ip, port);
-        if let Ok(group_conn) = group_server_client
+        let mut group_server_client = TcpClient::new(1, "GroupServer".to_string(), ip, port);
+        let (group_to_gate_tx, group_to_gate_rx) = mpsc::channel::<GateGroupCommands>(100);
+        if let Ok(group_handler) = group_server_client
             .connect::<GroupServerHandler, GroupServer, GateGroupCommands>(5)
             .await
         {
-            self.group_conn = Some(Arc::new(Mutex::new(group_conn)));
+            self.group_handler = Some(group_handler);
             let player_list = self.client_connections.read().await;
-            let group_conn = self.group_conn.clone().unwrap();
-            if let Err(err) = GroupServerHandler::on_connected(group_conn.clone()) {
+            if let Err(err) = GroupServerHandler::on_connected(
+                self.group_handler.clone().unwrap(),
+                group_to_gate_tx,
+            )
+            .await
+            {
                 println!(
                     "{} {}",
                     "Failed to start group server connection handler".red(),
@@ -173,12 +244,15 @@ impl GateServer {
                 println!("{}", "Connected to group server".green());
             }
 
-            GroupServerHandler::sync_player_list(
-                group_conn.clone(),
-                player_list,
-                "GateServer".to_string(),
-            )
-            .await;
+            self.group_handler
+                .clone()
+                .unwrap()
+                .read()
+                .await
+                .sync_player_list(player_list, "GateServer".to_string())
+                .await;
+
+            // TODO: handle data coming in from groupserver on `group_to_gate_rx`
         } else {
             println!(
                 "{} {}",
@@ -192,8 +266,8 @@ impl GateServer {
     }
 
     pub async fn start(&mut self) -> anyhow::Result<()> {
-        let client_connection_handle = self.start_client_connection_handler().await;
         self.start_group_server_connection_handler().await;
+        let client_connection_handle = self.start_client_connection_handler().await;
 
         client_connection_handle.await?;
         Ok(())

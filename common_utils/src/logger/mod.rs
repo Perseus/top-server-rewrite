@@ -1,6 +1,6 @@
 use colored::{Color, Colorize};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Logger {
     color: Color,
     prefix: String,

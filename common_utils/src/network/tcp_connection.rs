@@ -2,9 +2,10 @@ use bytes::{Buf, BytesMut};
 use colored::Color;
 use std::borrow::Borrow;
 use std::mem;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tokio::select;
 use tokio::time::interval;
 use tokio::{io::AsyncReadExt, time::Instant};
@@ -21,7 +22,8 @@ use super::rpc::{self, RPCManager};
 
 #[derive(Debug)]
 pub struct TcpConnection<T> {
-    id: String,
+    id: u32,
+    connection_type: String,
     stream: Option<TcpStream>,
     socket_addr: SocketAddr,
     application_context: Option<T>,
@@ -38,11 +40,12 @@ pub struct TcpConnection<T> {
     pub logger: Logger,
 }
 
-const MAX_PACKET_SIZE: usize = 4096;
+const MAX_PACKET_SIZE: usize = 8192;
 
 impl<T> TcpConnection<T> {
     pub fn new(
-        id: String,
+        id: u32,
+        connection_type: String,
         stream: TcpStream,
         socket_addr: SocketAddr,
         logger_prefix: String,
@@ -53,6 +56,7 @@ impl<T> TcpConnection<T> {
 
         TcpConnection {
             id,
+            connection_type,
             socket_addr,
             stream: Some(stream),
             application_context: None,
@@ -72,6 +76,15 @@ impl<T> TcpConnection<T> {
         &self.socket_addr
     }
 
+    pub fn get_ip_as_u32(&self) -> anyhow::Result<u32> {
+        if let IpAddr::V4(ip) = self.socket_addr.ip() {
+            let ip_as_u32 = u32::from_le_bytes(ip.octets());
+            Ok(ip_as_u32)
+        } else {
+            Err(anyhow::anyhow!("Not an IPv4 address"))
+        }
+    }
+
     fn heartbeat_handler(&self, data_send_channel_producer: mpsc::Sender<BasePacket>) {
         let last_received_data_at = self.last_received_data_at.clone();
         let cancellation_token = self.cancellation_token.clone();
@@ -85,7 +98,6 @@ impl<T> TcpConnection<T> {
                         if last_received_data_at.elapsed().as_secs() >= 2 {
                             let heartbeat_packet = HeartbeatPacket::default();
                             let base_packet: BasePacket = heartbeat_packet.to_base_packet().unwrap();
-                            println!("Sending heartbeat ping");
                             if let Err(err) = data_send_channel_producer.send(base_packet).await {
                                 println!("Error sending heartbeat ping - {:?}", err);
                                 break;
@@ -94,7 +106,6 @@ impl<T> TcpConnection<T> {
                     },
 
                     _ = cancellation_token.cancelled() => {
-                        println!("Stopping heartbeats due to cancellation");
                         break;
                     }
                 }
@@ -108,15 +119,19 @@ impl<T> TcpConnection<T> {
         mut data_send_rx: mpsc::Receiver<BasePacket>,
         data_send_tx: mpsc::Sender<BasePacket>,
     ) {
-        println!("Starting to process connection for {}", self.id);
+        self.logger.debug(&format!(
+            "Starting to process connection for {}.{}",
+            self.connection_type, self.id
+        ));
         self.rpc_mgr = Some(Arc::new(Mutex::new(RPCManager::new(data_send_tx.clone()))));
 
         let stream = self.stream.take();
         let (mut reader, writer) = stream.unwrap().into_split();
         let mut cancellation_token = self.cancellation_token.clone();
 
+        let logger = self.logger.clone();
         tokio::spawn(async move {
-            let stream_writer = writer;
+            let mut stream_writer = writer;
             loop {
                 select!(
                     recv_result = data_send_rx.recv() => {
@@ -125,8 +140,11 @@ impl<T> TcpConnection<T> {
                             let packet_as_vec = packet.get_as_bytes().to_vec();
                             let packet_as_slice = packet_as_vec.as_slice();
 
-                            println!("Sending packet: {:?}", packet_as_slice);
-                            if stream_writer.try_write(packet_as_slice).is_ok() {
+                            if let Ok(num_bytes_written) = stream_writer.try_write(packet_as_slice){
+                                stream_writer.flush().await.unwrap();
+                                if num_bytes_written > 2 {
+                                    logger.debug("Sent packet to client");
+                                }
                             } else {
                                 println!("Error writing to stream");
                             }
@@ -137,7 +155,6 @@ impl<T> TcpConnection<T> {
                     },
 
                     _ = cancellation_token.cancelled() => {
-                        println!("Stopping data send due to cancellation");
                         break;
                     }
                 );
@@ -150,14 +167,16 @@ impl<T> TcpConnection<T> {
         let rpc_mgr = self.rpc_mgr.clone().unwrap();
         cancellation_token = self.cancellation_token.clone();
 
+        let logger = self.logger.clone();
         tokio::spawn(async move {
             let mut buffer = BytesMut::with_capacity(MAX_PACKET_SIZE);
+            let logger = logger;
             loop {
                 select!(
                     recv_result = reader.read_buf(&mut buffer) => {
                         match recv_result {
                             Ok(0) => {
-                                println!("Connection closed by client.");
+                                cancellation_token.cancel();
                                 break;
                             }
 
@@ -165,37 +184,28 @@ impl<T> TcpConnection<T> {
                                 let mut last_received_data_at = last_received_data_at.lock().await;
                                 *last_received_data_at = Instant::now();
 
-                                match BasePacket::check_frame(&buffer, false) {
-                                    Err(crate::packet::FrameError::Incomplete) => {
-                                        println!("Incomplete frame");
+                                while let Ok(n) = BasePacket::check_frame(&buffer, false) {
+                                    if n == 2 {
+                                        buffer.advance(n);
                                         continue;
                                     }
 
-                                    Err(crate::packet::FrameError::Invalid) => {
-                                        println!("Invalid frame");
-                                        break;
-                                    }
+                                    let packet = BasePacket::parse_frame(&mut buffer, n).unwrap();
+                                    let mut rpc_mgr = rpc_mgr.lock().await;
 
-                                    Ok(n) => {
-                                        let packet = BasePacket::parse_frame(&mut buffer, n).unwrap();
-                                        let mut rpc_mgr = rpc_mgr.lock().await;
-                                        let is_for_rpc = rpc_mgr.check_packet_for_rpc_response(&packet).await;
-
-                                        if is_for_rpc {
-                                            if let Ok(()) = rpc_mgr.handle_rpc_reply(packet).await {
-                                                buffer.advance(n);
-                                                continue;
-                                            } else {
-                                                break;
-                                            }
-                                        }
-
-                                        buffer.advance(n);
-                                        if packet.get_len() == 2 {
+                                    let is_for_rpc = rpc_mgr.check_packet_for_rpc_response(&packet).await;
+                                    if is_for_rpc {
+                                        if let Ok(()) = rpc_mgr.handle_rpc_reply(packet).await {
+                                            buffer.advance(n);
                                             continue;
+                                        } else {
+                                            break;
                                         }
-                                        data_recv_tx.send(packet).await.unwrap();
                                     }
+
+                                    buffer.advance(n);
+                                    data_recv_tx.send(packet).await.unwrap();
+                                    logger.debug("Sent packet to data channel");
                                 }
                             }
 
@@ -204,7 +214,6 @@ impl<T> TcpConnection<T> {
                     },
 
                     _ = cancellation_token.cancelled() => {
-                        println!("Stopping data recv due to cancellation");
                         break;
                     }
                 );
@@ -216,8 +225,16 @@ impl<T> TcpConnection<T> {
         self.application_context = Some(context);
     }
 
+    pub fn unset_application_context(&mut self) {
+        self.application_context = None;
+    }
+
     pub fn get_application_context(&self) -> Option<&T> {
         self.application_context.as_ref()
+    }
+
+    pub fn get_id(&self) -> u32 {
+        self.id
     }
 
     pub async fn send_data(&mut self, packet: BasePacket) -> anyhow::Result<()> {
@@ -229,13 +246,13 @@ impl<T> TcpConnection<T> {
         }
     }
 
-    pub async fn close(&mut self) -> anyhow::Result<()> {
+    pub async fn close(&mut self, delay_in_ms: Duration) {
+        tokio::time::sleep(delay_in_ms).await;
         self.cancellation_token.cancel();
-        Ok(())
     }
 
     pub fn mark_connected(&mut self) {
-        println!("Marking connection as connected");
+        self.logger.info("Marking connection as connected");
         self.is_connected = true;
     }
 
@@ -255,6 +272,9 @@ impl<T> TcpConnection<T> {
             rpc_call.wait_for_result(Duration::from_secs(30)).await?;
 
             if let Some(result) = rpc_call.get_result().await {
+                self.logger
+                    .debug(format!("[sess_id={}] RPC Result", rpc_call.get_session_id()).as_str());
+                result.inspect_with_logger(&self.logger);
                 Ok(result)
             } else {
                 Err(anyhow::anyhow!("No result"))

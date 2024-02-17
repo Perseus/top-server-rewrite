@@ -1,4 +1,4 @@
-mod auth;
+pub mod auth;
 pub mod commands;
 pub mod heartbeat;
 pub mod init;
@@ -9,15 +9,18 @@ use num_enum::IntoPrimitive;
 use num_enum::TryFromPrimitive;
 use std::fmt::Write;
 use std::io::Cursor;
+use std::time::Duration;
+use tokio::time::Instant;
 
 use std::iter::FromIterator;
 use std::mem::size_of;
 
 use commands::*;
 
+use crate::logger::Logger;
 use crate::network::rpc::MAX_SESS_ID_VALUE;
 
-const DEFAULT_HEADER: u32 = 6;
+const DEFAULT_HEADER: u32 = 0x80000000;
 
 #[derive(Debug, PartialEq)]
 pub enum FrameError {
@@ -38,6 +41,7 @@ pub trait PacketReader {
     fn reverse_read_char(&mut self) -> Option<u8>;
     fn reverse_read_short(&mut self) -> Option<u16>;
     fn reverse_read_long(&mut self) -> Option<u32>;
+    fn reverse_read_bytes(&mut self, num_bytes: usize) -> Option<&[u8]>;
 }
 
 pub trait PacketWriter {
@@ -83,7 +87,7 @@ pub struct BasePacket {
     offset: u8,
     header: u32,
     reverse_offset: u8,
-    tick_count: u64,
+    tick_count: Instant,
     is_for_rpc: bool,
     session_id: Option<u32>,
     is_built: bool,
@@ -99,7 +103,7 @@ impl BasePacket {
             offset: 4,
             header: DEFAULT_HEADER,
             reverse_offset: 0,
-            tick_count: 0,
+            tick_count: Instant::now(),
             is_for_rpc: false,
             session_id: None,
             is_built: false,
@@ -114,10 +118,10 @@ impl BasePacket {
             offset: 0,
             header: 0,
             reverse_offset: 0,
-            tick_count: 0,
+            tick_count: Instant::now(),
             is_for_rpc: false,
             session_id: None,
-            is_built: false,
+            is_built: true,
         };
 
         if let Some(size) = packet.read_short() {
@@ -140,6 +144,10 @@ impl BasePacket {
         self.data
     }
 
+    pub fn get_time_since_creation(&self) -> Duration {
+        self.tick_count.elapsed()
+    }
+
     pub fn is_for_rpc(&self) -> bool {
         self.is_for_rpc
     }
@@ -152,11 +160,13 @@ impl BasePacket {
         self.size = len
     }
 
+    pub fn get_session_id(&self) -> Option<u32> {
+        self.session_id
+    }
+
     pub fn get_remaining_packet_len(&self) -> usize {
         let offset = self.offset as usize;
-        let remaining_packet_len = self.data.len() - offset;
-
-        remaining_packet_len
+        self.data.len() - offset
     }
 
     pub fn has_data(&self) -> bool {
@@ -211,11 +221,48 @@ impl BasePacket {
         Ok(packet_length as usize)
     }
 
+    pub fn discard_last(&mut self, len: usize) {
+        self.data.truncate(self.data.len() - len);
+        self.set_len(self.data.len() as u16);
+        if len > self.reverse_offset as usize {
+            self.reverse_offset = 0;
+        } else {
+            self.reverse_offset -= len as u8;
+        }
+    }
+
+    /// Removes all bytes in the range from the buffer
+    /// RESETS THE OFFSET
+    pub fn remove_range(&mut self, range: std::ops::Range<usize>) {
+        let mut remaining_bytes = self.data.split_off(range.start);
+        let end_bytes = remaining_bytes.split_off(range.end - range.start);
+        self.data.unsplit(end_bytes);
+        self.offset = 0;
+
+        self.set_len(self.data.len() as u16);
+    }
+
     // this function assumes that the data in the buffer has been previously checked by the `check_frame` function
     // never use this without using check_frame
     pub fn parse_frame(buffer: &mut BytesMut, len: usize) -> Result<Self, FrameError> {
         let final_buffer = BytesMut::from_iter(&buffer[0..len]);
         Ok(BasePacket::from_bytes(final_buffer))
+    }
+
+    pub fn reset_header(&mut self) {
+        self.header = DEFAULT_HEADER;
+        self.session_id = Some(DEFAULT_HEADER);
+    }
+
+    pub fn inspect_with_logger(&self, logger: &Logger) {
+        logger.debug("------ Inspected Packet -------");
+        logger.debug(format!("[Packet] Size: {}", self.size).as_str());
+        logger.debug(format!("[Packet] Header: {:?}", self.data.get(2..6)).as_str());
+        logger.debug(format!("[Packet] Command: {:?}", self.data.get(6..8)).as_str());
+        logger.debug(format!("[Packet] Data: {:?}", self.data.get(8..self.size as usize)).as_str());
+        logger.debug(format!("[Packet] Offset: {:?}", self.offset).as_str());
+        logger.debug(format!("[Packet] Reverse Offset: {:?}", self.reverse_offset).as_str());
+        logger.debug("-------------------------------");
     }
 
     pub fn inspect(&self) {
@@ -224,6 +271,8 @@ impl BasePacket {
         println!("[Packet] Header: {:?}", self.data.get(2..6));
         println!("[Packet] Command: {:?}", self.data.get(6..8));
         println!("[Packet] Data: {:?}", self.data.get(8..self.size as usize));
+        println!("[Packet] Offset: {:?}", self.offset);
+        println!("[Packet] Reverse Offset: {:?}", self.reverse_offset);
         println!("-------------------------------");
     }
 }
@@ -243,12 +292,18 @@ impl PacketReader for BasePacket {
         let data_len_to_read = size_of::<u16>();
         if let Some(mut command_data) = self.data.get(offset..offset + data_len_to_read) {
             let primitive_command = command_data.read_u16::<BigEndian>().ok()?;
-            let command = Command::try_from_primitive(primitive_command).ok()?;
+            if let Ok(command) = Command::try_from_primitive(primitive_command) {
+                self.increment_offset::<u16>();
+                self.cmd = command.clone();
 
-            self.increment_offset::<u16>();
-            self.cmd = command.clone();
+                return Some(command);
+            } else {
+                println!("Unknown command -> {}", primitive_command);
+                self.increment_offset::<u16>();
+                self.cmd = Command::None;
 
-            return Some(command);
+                return Some(Command::None);
+            }
         } else {
             println!("no cmd found");
         }
@@ -424,6 +479,26 @@ impl PacketReader for BasePacket {
         Some(data_to_return)
     }
 
+    /// Reads a set number of bytes from the trailing end of a packet
+    ///
+    /// Increments a "reverse" offset which tracks the data that has been previously returned from the end
+    fn reverse_read_bytes(&mut self, num_bytes: usize) -> Option<&[u8]> {
+        if self.get_total_packet_len() < (self.reverse_offset as usize + num_bytes) {
+            return None;
+        }
+
+        for _ in 0..num_bytes {
+            self.increment_reverse_offset::<u8>();
+        }
+
+        let end_index = self.get_total_packet_len() - self.reverse_offset as usize;
+        let start_index = end_index - num_bytes;
+
+        let data = self.data.get(start_index..end_index)?;
+
+        Some(data)
+    }
+
     fn read_session_id(&self) -> Option<u32> {
         // 2 bytes for the size
         let start_index = 2;
@@ -458,11 +533,6 @@ impl PacketWriter for BasePacket {
 
     fn write_cmd(&mut self, cmd: Command) -> anyhow::Result<()> {
         let command: u16 = cmd.into();
-        let mut buf: Vec<u8> = vec![0; 2];
-
-        LittleEndian::write_u16(&mut buf[..], command);
-
-        self.write_buffer(buf)?;
         self.cmd = Command::try_from_primitive(command)?;
 
         Ok(())
@@ -543,10 +613,10 @@ impl PacketWriter for BasePacket {
 
     fn build_packet(&mut self) -> anyhow::Result<()> {
         if self.is_built {
-            // delete bytes 0..6 because header and size are already written
-            self.data = self.data.split_off(6);
+            // delete bytes 0..8 because size, header and command are already written
+            self.data = self.data.split_off(8);
         }
-        let size = (self.data.len() + 4 + 2) as u16; // total data + header + length of the size data itself
+        let size = (self.data.len() + 4 + 2 + 2) as u16; // total data + header + length of the size data itself + length of command
 
         let size_buf = size.to_be_bytes().to_vec();
         let mut header_buf = self.header.to_be_bytes().to_vec();
@@ -556,7 +626,10 @@ impl PacketWriter for BasePacket {
             header_buf = session_id_buf;
         }
 
-        let full_buf = [size_buf, header_buf].concat();
+        let mut cmd_buf: Vec<u8> = vec![0; 2];
+        BigEndian::write_u16(&mut cmd_buf[..], self.cmd.clone() as u16);
+
+        let full_buf = [size_buf, header_buf, cmd_buf].concat();
 
         let mut byte_buffer = BytesMut::from_iter(full_buf);
         let empty_buffer = BytesMut::new();

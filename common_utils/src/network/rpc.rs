@@ -9,7 +9,10 @@ use tokio::{
     sync::{mpsc, Mutex, Notify, OwnedSemaphorePermit},
 };
 
-use crate::packet::{BasePacket, PacketReader, PacketWriter};
+use crate::{
+    logger::Logger,
+    packet::{BasePacket, PacketReader, PacketWriter},
+};
 
 #[derive(Debug)]
 struct SessionIdManager {
@@ -68,6 +71,10 @@ impl RPCCall {
     pub async fn get_result(&self) -> Option<BasePacket> {
         self.result.lock().await.take()
     }
+
+    pub fn get_session_id(&self) -> u64 {
+        self.session_id
+    }
 }
 
 #[derive(Debug)]
@@ -75,6 +82,7 @@ pub struct RPCManager {
     session_id_manager: SessionIdManager,
     rpc_calls: HashMap<u64, Arc<RPCCall>>,
     rpc_send_tx: mpsc::Sender<BasePacket>,
+    logger: Logger,
 }
 
 impl RPCManager {
@@ -83,6 +91,7 @@ impl RPCManager {
             session_id_manager: SessionIdManager::new(),
             rpc_calls: HashMap::new(),
             rpc_send_tx,
+            logger: Logger::new(colored::Color::Cyan, String::from("RPCManager"), false),
         }
     }
 
@@ -111,6 +120,15 @@ impl RPCManager {
 
         packet.write_session_id(session_id as u32)?;
         packet.build_packet()?;
+
+        self.logger.debug(
+            format!(
+                "[sess_id={}] Sending RPC",
+                packet.get_session_id().unwrap_or(0)
+            )
+            .as_str(),
+        );
+        packet.inspect_with_logger(&self.logger);
 
         if let Err(err) = self.rpc_send_tx.send(packet).await {
             return Err(anyhow::anyhow!("Error sending rpc call: {:?}", err));

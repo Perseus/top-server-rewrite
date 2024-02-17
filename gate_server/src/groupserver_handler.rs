@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use colored::{Color, Colorize};
 use common_utils::{
     network::{connection_handler::ConnectionHandler, tcp_connection::*, tcp_server::*},
@@ -6,14 +7,10 @@ use common_utils::{
         *,
     },
 };
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{
     select,
-    sync::{mpsc, Mutex, RwLockReadGuard},
+    sync::{mpsc, Mutex, MutexGuard, RwLock, RwLockReadGuard},
     task::JoinSet,
     time::{interval, sleep},
 };
@@ -25,22 +22,37 @@ use crate::{
 
 pub enum GateGroupCommands {}
 
-pub struct GroupServerHandler {}
+#[derive(Debug)]
+pub struct GroupServerHandler {
+    connection: Arc<Mutex<TcpConnection<GroupServer>>>,
+    gate_commands_tx: Option<mpsc::Sender<GateGroupCommands>>,
+}
 
 impl GroupServerHandler {
-    pub fn new() -> Self {
-        GroupServerHandler {}
+    pub fn new(connection: Arc<Mutex<TcpConnection<GroupServer>>>) -> Self {
+        GroupServerHandler {
+            connection: connection.clone(),
+            gate_commands_tx: None,
+        }
+    }
+
+    pub async fn sync_rpc(&self, packet: BasePacket) -> anyhow::Result<BasePacket> {
+        self.connection.lock().await.sync_rpc(packet).await
+    }
+
+    pub async fn send_data(&self, packet: BasePacket) -> anyhow::Result<()> {
+        self.connection.lock().await.send_data(packet).await
     }
 
     pub async fn sync_player_list(
-        group_connection: Arc<Mutex<TcpConnection<GroupServer>>>,
+        &self,
         player_map: RwLockReadGuard<'_, HashMap<u32, PlayerConnection>>,
         gate_server_name: String,
     ) {
         let mut interval = interval(Duration::from_millis(100));
         loop {
             let _ = interval.tick().await;
-            let mut connection = group_connection.lock().await;
+            let mut connection = self.connection.lock().await;
             if !connection.is_connected() {
                 continue;
             }
@@ -91,69 +103,89 @@ impl GroupServerHandler {
     }
 }
 
+#[async_trait]
 impl ConnectionHandler<GroupServer, GateGroupCommands> for GroupServerHandler {
     fn on_connect(
-        id: String,
+        id: u32,
+        server_type: String,
         stream: tokio::net::TcpStream,
         socket: std::net::SocketAddr,
-    ) -> TcpConnection<GroupServer> {
+    ) -> Arc<RwLock<Self>> {
+        let prefix = format!("{}.{}", server_type, id);
         let mut connection = TcpConnection::new(
             id,
+            server_type,
             stream,
             socket,
-            "GroupServer".to_string(),
+            prefix,
             colored::Color::Magenta,
         );
         let group_server = GroupServer::new();
-
         connection.set_application_context(group_server);
-        connection
+        let (gate_commands_tx, _gate_commands_rx) = mpsc::channel::<GateGroupCommands>(100);
+        let handler = GroupServerHandler::new(Arc::new(Mutex::new(connection)));
+        Arc::new(RwLock::new(handler))
     }
 
-    fn on_connected(connection: Arc<Mutex<TcpConnection<GroupServer>>>) -> anyhow::Result<()> {
+    async fn on_connected(
+        handler: Arc<RwLock<Self>>,
+        parent_comm_tx: mpsc::Sender<GateGroupCommands>,
+    ) -> anyhow::Result<()> {
         let (recv_tx, mut recv_rx) = mpsc::channel(100);
         let (send_tx, send_rx) = mpsc::channel(100);
+        {
+            let binding = handler.clone();
+            let mut writable_handler = binding.write().await;
+            writable_handler.gate_commands_tx = Some(parent_comm_tx);
+        }
 
-        let mut group_conn = connection.clone();
-        tokio::spawn(async move {
-            let mut connection = group_conn.lock().await;
-            println!("took lock");
-            connection
-                .start_processing(recv_tx, send_rx, send_tx.clone())
-                .await;
+        {
+            let binding = handler.clone();
+            let group_handler = binding.read().await;
 
-            println!("gonna drop lock");
-        });
+            let group_conn = group_handler.connection.clone();
+            tokio::spawn(async move {
+                let mut connection = group_conn.lock().await;
+                connection
+                    .start_processing(recv_tx, send_rx, send_tx.clone())
+                    .await;
+            });
+        }
+        {
+            let binding = handler.clone();
+            tokio::spawn(async move {
+                let group_handler = binding.read().await;
 
-        tokio::spawn(async move {
-            loop {
-                match recv_rx.recv().await {
-                    Some(packet) => {
-                        GroupServerHandler::on_data(packet);
-                    }
-                    None => {
-                        println!("{}", "GroupServer channel closed".red());
-                        break;
+                loop {
+                    match recv_rx.recv().await {
+                        Some(packet) => {
+                            group_handler.on_data(packet);
+                        }
+                        None => {
+                            println!("{}", "GroupServer channel closed".red());
+                            break;
+                        }
                     }
                 }
-            }
-        });
+            });
+        }
 
-        group_conn = connection.clone();
+        let binding = handler.clone();
         tokio::spawn(async move {
+            let group_handler = binding.read().await;
+            let group_conn = group_handler.connection.clone();
             let init_group_packet = InitGroupPacket::new(103, "GateServer".to_string())
                 .to_base_packet()
                 .unwrap();
 
             let mut connection = group_conn.lock().await;
-            println!("took lock");
             let mut response = connection.sync_rpc(init_group_packet).await.unwrap();
 
             let err = response.read_short();
             if (err.is_some() && err.unwrap() == 501) || !response.has_data() {
                 println!("{}", "Group server rejected connection".red());
                 sleep(Duration::from_secs(5)).await;
-                connection.close().await.unwrap();
+                connection.close(Duration::ZERO).await;
             } else {
                 connection.mark_connected();
             }
@@ -165,14 +197,17 @@ impl ConnectionHandler<GroupServer, GateGroupCommands> for GroupServerHandler {
                 )
                 .as_str(),
             );
-
-            println!("gonna drop lock");
         });
 
         Ok(())
     }
 
-    fn on_data(packet: BasePacket) {
-        println!("Received packet: {:?}", packet);
+    fn on_data(&self, packet: BasePacket) {
+        let conn = self.connection.clone();
+        tokio::spawn(async move {
+            let conn = conn.lock().await;
+            conn.logger.debug("Received packet");
+            packet.inspect_with_logger(&conn.logger);
+        });
     }
 }
