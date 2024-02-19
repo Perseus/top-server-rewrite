@@ -36,7 +36,7 @@ pub struct TcpConnection<T> {
 
     rpc_mgr: Option<Arc<Mutex<RPCManager>>>,
     cancellation_token: CancellationToken,
-    is_connected: bool,
+    is_ready: bool,
     pub logger: Logger,
 }
 
@@ -67,7 +67,7 @@ impl<T> TcpConnection<T> {
             rpc_reply_recv_rx: rpc_reply_recv_channel.1,
             rpc_mgr: None,
             cancellation_token: CancellationToken::new(),
-            is_connected: false,
+            is_ready: false,
             logger: Logger::new(logger_color, logger_prefix, false),
         }
     }
@@ -253,11 +253,11 @@ impl<T> TcpConnection<T> {
 
     pub fn mark_connected(&mut self) {
         self.logger.info("Marking connection as connected");
-        self.is_connected = true;
+        self.is_ready = true;
     }
 
-    pub fn is_connected(&self) -> bool {
-        self.is_connected
+    pub fn is_ready(&self) -> bool {
+        self.is_ready
     }
 
     pub async fn sync_rpc(&mut self, packet: BasePacket) -> anyhow::Result<BasePacket> {

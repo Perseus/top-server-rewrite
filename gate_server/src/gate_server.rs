@@ -52,7 +52,7 @@ pub struct GateServer {
     // other services store U32 as the player's "gate address" which is required to communicate to
     // specific players directly
     player_num_counter: Arc<AtomicU32>,
-    group_handler: Option<Arc<RwLock<GroupServerHandler>>>,
+    group_handler: Arc<RwLock<GroupServerHandler>>,
 }
 
 impl GateServer {
@@ -70,7 +70,7 @@ impl GateServer {
             config,
             player_num_counter: Arc::new(AtomicU32::new(1)),
             client_connections: Arc::new(RwLock::new(HashMap::new())),
-            group_handler: None,
+            group_handler: Arc::new(RwLock::new(GroupServerHandler::new())),
         }
     }
 
@@ -173,7 +173,7 @@ impl GateServer {
         );
 
         let player_counter = self.player_num_counter.clone();
-        let groupserver_handler = self.group_handler.clone().unwrap();
+        let groupserver_handler = self.group_handler.clone();
         let (client_to_gate_tx, mut client_to_gate_rx) = mpsc::channel::<ClientGateCommands>(100);
         let client_tcp_connections_for_client_commands_handler = client_tcp_connections.clone();
 
@@ -218,51 +218,29 @@ impl GateServer {
      */
     async fn start_group_server_connection_handler(&mut self) {
         let (ip, port) = self.config.get_server_ip_and_port_for_group_server();
-        let connect_addr = format!("{}:{}", ip, port);
 
-        let mut group_server_client = TcpClient::new(1, "GroupServer".to_string(), ip, port);
-        let (group_to_gate_tx, group_to_gate_rx) = mpsc::channel::<GateGroupCommands>(100);
-        if let Ok(group_handler) = group_server_client
-            .connect::<GroupServerHandler, GroupServer, GateGroupCommands>(5)
-            .await
-        {
-            self.group_handler = Some(group_handler);
-            let player_list = self.client_connections.read().await;
-            if let Err(err) = GroupServerHandler::on_connected(
-                self.group_handler.clone().unwrap(),
+        let (group_to_gate_tx, mut group_to_gate_rx) = mpsc::channel::<GateGroupCommands>(100);
+
+        let player_map = self.client_connections.clone();
+        let gate_server_name = "GateServer".to_string();
+        let gp_handler = self.group_handler.clone();
+        tokio::spawn(async move {
+            GroupServerHandler::start_connection_loop(
+                gp_handler,
+                player_map,
+                gate_server_name,
+                ip,
+                port,
                 group_to_gate_tx,
             )
-            .await
-            {
-                println!(
-                    "{} {}",
-                    "Failed to start group server connection handler".red(),
-                    err.to_string().red().underline(),
-                );
-                panic!()
-            } else {
-                println!("{}", "Connected to group server".green());
+            .await;
+        });
+
+        tokio::spawn(async move {
+            while let Some(command) = group_to_gate_rx.recv().await {
+                match command {}
             }
-
-            self.group_handler
-                .clone()
-                .unwrap()
-                .read()
-                .await
-                .sync_player_list(player_list, "GateServer".to_string())
-                .await;
-
-            // TODO: handle data coming in from groupserver on `group_to_gate_rx`
-        } else {
-            println!(
-                "{} {}",
-                "Unable to connect to group server at".red(),
-                connect_addr.red(),
-            );
-
-            sleep(tokio::time::Duration::from_secs(5)).await;
-            panic!()
-        }
+        });
     }
 
     pub async fn start(&mut self) -> anyhow::Result<()> {

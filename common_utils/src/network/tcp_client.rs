@@ -26,34 +26,16 @@ impl TcpClient {
         }
     }
 
-    async fn handle_connection<HandlerType, ApplicationContextType, CommandChannelType>(
-        id: u32,
-        server_type: String,
-        stream: TcpStream,
-        socket_addr: SocketAddr,
-    ) -> anyhow::Result<Arc<RwLock<HandlerType>>>
-    where
-        HandlerType: ConnectionHandler<ApplicationContextType, CommandChannelType>,
-    {
-        Ok(HandlerType::on_connect(
-            id,
-            server_type,
-            stream,
-            socket_addr,
-        ))
-    }
-
     pub async fn connect<HandlerType, ApplicationContextType, CommandChannelType>(
         &mut self,
         retry_interval_in_secs: u64,
-    ) -> anyhow::Result<Arc<RwLock<HandlerType>>>
+    ) -> anyhow::Result<TcpStream>
     where
         HandlerType: ConnectionHandler<ApplicationContextType, CommandChannelType>,
     {
         loop {
             match TcpStream::connect(format!("{}:{}", self.target_ip, self.target_port)).await {
                 Ok(stream) => {
-                    let socket_addr = stream.peer_addr();
                     println!(
                         "{}",
                         format!(
@@ -62,19 +44,8 @@ impl TcpClient {
                         )
                         .green()
                     );
-                    let connection = TcpClient::handle_connection::<
-                        HandlerType,
-                        ApplicationContextType,
-                        CommandChannelType,
-                    >(
-                        self.id,
-                        self.server_type.clone(),
-                        stream,
-                        socket_addr.unwrap(),
-                    )
-                    .await?;
 
-                    return Ok(connection);
+                    return Ok(stream);
                 }
                 Err(err) => {
                     println!(

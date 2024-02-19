@@ -183,6 +183,8 @@ impl ClientHandler {
         let connection = self.connection.clone();
         let gpserver_handler = self.groupserver_handler.clone().unwrap();
 
+        // let gpserver_handler = self.groupserver_handler.unwrap().as_ref();
+
         tokio::spawn(async move {
             let mut conn = connection.lock().await;
             conn.logger.debug("Handling user login");
@@ -261,8 +263,8 @@ impl ClientHandler {
             gpserver_packet.write_long(conn.get_id()).unwrap();
             gpserver_packet.write_short(916).unwrap();
 
-            let gpserver_read_handler = gpserver_handler.read().await;
-            if let Ok(mut result) = gpserver_read_handler.sync_rpc(gpserver_packet).await {
+            let gpserver_handler = gpserver_handler.read().await;
+            if let Ok(mut result) = gpserver_handler.sync_rpc(gpserver_packet).await {
                 if !result.has_data() {
                     let err_pkt = ClientLoginErrorPacket::new(ErrorCode::ErrNetworkException)
                         .to_base_packet()
