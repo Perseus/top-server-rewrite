@@ -59,7 +59,7 @@ pub trait PacketWriter {
 }
 
 pub trait TypedPacket {
-    fn from(base_packet: BasePacket) -> anyhow::Result<Self>
+    fn from_base_packet(base_packet: BasePacket) -> anyhow::Result<Self>
     where
         Self: Sized;
 
@@ -83,6 +83,7 @@ pub trait TypedPacket {
 pub struct BasePacket {
     data: BytesMut,
     cmd: Command,
+    raw_cmd: u16,
     size: u16,
     offset: u8,
     header: u32,
@@ -99,6 +100,7 @@ impl BasePacket {
         BasePacket {
             data: BytesMut::with_capacity(64),
             cmd: Command::None,
+            raw_cmd: 0,
             size: 0,
             offset: 4,
             header: DEFAULT_HEADER,
@@ -114,6 +116,7 @@ impl BasePacket {
         let mut packet = BasePacket {
             data,
             cmd: Command::None,
+            raw_cmd: 0,
             size: 0,
             offset: 0,
             header: 0,
@@ -275,6 +278,10 @@ impl BasePacket {
         println!("[Packet] Reverse Offset: {:?}", self.reverse_offset);
         println!("-------------------------------");
     }
+
+    pub fn get_raw_cmd(&self) -> u16 {
+        self.raw_cmd
+    }
 }
 
 impl PacketReader for BasePacket {
@@ -292,6 +299,7 @@ impl PacketReader for BasePacket {
         let data_len_to_read = size_of::<u16>();
         if let Some(mut command_data) = self.data.get(offset..offset + data_len_to_read) {
             let primitive_command = command_data.read_u16::<BigEndian>().ok()?;
+            self.raw_cmd = primitive_command;
             if let Ok(command) = Command::try_from_primitive(primitive_command) {
                 self.increment_offset::<u16>();
                 self.cmd = command.clone();
@@ -395,7 +403,6 @@ impl PacketReader for BasePacket {
             .read_u16::<BigEndian>()
             .ok()? as usize;
 
-        println!("sequence length -> {}", sequence_length);
         if self.get_remaining_packet_len() < sequence_length {
             return None;
         }
@@ -534,6 +541,7 @@ impl PacketWriter for BasePacket {
     fn write_cmd(&mut self, cmd: Command) -> anyhow::Result<()> {
         let command: u16 = cmd.into();
         self.cmd = Command::try_from_primitive(command)?;
+        self.raw_cmd = command;
 
         Ok(())
     }
@@ -627,7 +635,7 @@ impl PacketWriter for BasePacket {
         }
 
         let mut cmd_buf: Vec<u8> = vec![0; 2];
-        BigEndian::write_u16(&mut cmd_buf[..], self.cmd.clone() as u16);
+        BigEndian::write_u16(&mut cmd_buf[..], self.raw_cmd);
 
         let full_buf = [size_buf, header_buf, cmd_buf].concat();
 

@@ -79,19 +79,28 @@ impl GroupServerHandler {
         connection.set_application_context(group_server);
 
         let group_connection = self.connection.clone();
+
         let mut write_lock = group_connection.write().await;
         write_lock.replace(connection);
     }
 
-    async fn send_init_packet(&self) -> anyhow::Result<()> {
+    async fn send_init_packet(&self, gate_server_name: String) -> anyhow::Result<()> {
         let group_conn = self.connection.clone();
-        let init_group_packet = InitGroupPacket::new(103, "GateServer".to_string())
+        let init_group_packet = InitGroupPacket::new(103, gate_server_name)
             .to_base_packet()
             .unwrap();
 
         let mut write_lock = group_conn.write().await;
         let connection = write_lock.as_mut().unwrap();
-        let mut response = connection.sync_rpc(init_group_packet).await.unwrap();
+
+        let response = connection.sync_rpc(init_group_packet).await;
+        if response.is_err() {
+            return Err(anyhow::anyhow!(
+                "Failed to send init packet to group server"
+            ));
+        }
+
+        let mut response = response.unwrap();
 
         let err = response.read_short();
         if (err.is_some() && err.unwrap() == 501) || !response.has_data() {
@@ -129,6 +138,7 @@ impl GroupServerHandler {
             let readable_handler = handler.read().await;
             if !readable_handler.is_tcp_connection_established().await {
                 readable_handler.connect(ip, port).await;
+
                 drop(readable_handler);
 
                 GroupServerHandler::on_connected(handler.clone(), group_to_gate_tx.clone())
@@ -137,7 +147,11 @@ impl GroupServerHandler {
 
                 let readable_handler = handler.read().await;
 
-                if (readable_handler.send_init_packet().await).is_err() {
+                if (readable_handler
+                    .send_init_packet(gate_server_name.clone())
+                    .await)
+                    .is_err()
+                {
                     sleep(Duration::from_secs(5)).await;
                     continue;
                 }
@@ -165,6 +179,8 @@ impl GroupServerHandler {
                     sleep(Duration::from_secs(1)).await;
                     continue;
                 }
+
+                sleep(Duration::from_secs(1)).await;
             }
         }
     }

@@ -2,7 +2,7 @@ use std::{net::Ipv4Addr, net::SocketAddr, sync::Arc, time::Duration};
 
 use colored::Colorize;
 use tokio::{
-    net::TcpStream,
+    net::{TcpSocket, TcpStream},
     sync::{mpsc, RwLock},
     time::sleep,
 };

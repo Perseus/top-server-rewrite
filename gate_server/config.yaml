@@ -1,3 +1,6 @@
+main:
+  name: "GateServer2"
+
 client_config:
   ip: "127.0.0.1"
   ddos_protection: true

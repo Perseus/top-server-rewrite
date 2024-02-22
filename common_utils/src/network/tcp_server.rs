@@ -26,6 +26,8 @@ impl TcpServer {
             ),
         };
 
+        println!("started server at port at {:?}", connect_addr);
+
         loop {
             let (socket, socket_addr) = server.accept().await?;
             client_comm_channel_tracker_tx.send(socket).await.unwrap();

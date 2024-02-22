@@ -21,6 +21,8 @@ use tokio::{
 use crate::{
     client_handler::{ClientGateCommands, ClientHandler},
     config::{self, GateServerConfig},
+    gameserver::{self, GameServer, GameServerList},
+    gameserver_handler::{GameServerGateCommands, GameServerHandler, GameServerRejectionReason},
     group_server::GroupServer,
     groupserver_handler::{GateGroupCommands, GroupServerHandler},
     player::Player,
@@ -28,6 +30,8 @@ use crate::{
 
 // TODO: figure out how to set this from config at runtime
 pub const SUPPORTED_CLIENT_VERSION: u16 = 136;
+
+pub const MAXIMUM_MAPS_PER_GAMESERVER: u16 = 100;
 
 /**
  * This maps an ever-growing counter that acts as the player's internal (in-memory) ID to the
@@ -45,6 +49,7 @@ pub type PlayerConnection = Arc<Mutex<TcpConnection<Player>>>;
 pub type PlayerConnectionMap = Arc<RwLock<HashMap<u32, PlayerConnection>>>;
 
 pub struct GateServer {
+    name: String,
     config: GateServerConfig,
     client_connections: PlayerConnectionMap,
 
@@ -53,6 +58,9 @@ pub struct GateServer {
     // specific players directly
     player_num_counter: Arc<AtomicU32>,
     group_handler: Arc<RwLock<GroupServerHandler>>,
+
+    game_server_counter: Arc<AtomicU32>,
+    game_servers: Arc<RwLock<GameServerList>>,
 }
 
 impl GateServer {
@@ -67,10 +75,13 @@ impl GateServer {
         let config = config::parse_config(Path::new(path));
 
         GateServer {
+            name: config.get_name(),
             config,
             player_num_counter: Arc::new(AtomicU32::new(1)),
+            game_server_counter: Arc::new(AtomicU32::new(1)),
             client_connections: Arc::new(RwLock::new(HashMap::new())),
             group_handler: Arc::new(RwLock::new(GroupServerHandler::new())),
+            game_servers: Arc::new(RwLock::new(GameServerList::new())),
         }
     }
 
@@ -98,13 +109,20 @@ impl GateServer {
         stream: TcpStream,
         groupserver_handler: Arc<RwLock<GroupServerHandler>>,
         client_to_gate_tx: mpsc::Sender<ClientGateCommands>,
+        gameserver_list: Arc<RwLock<GameServerList>>,
     ) {
         let mut map = client_conn_map.write().await;
         // relaxed ordering is fine, this is just to give a unique ID to the player
         // there aren't any other
         let id = player_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let socket_addr = stream.peer_addr().unwrap();
-        let handler = ClientHandler::on_connect(id, "Client".to_string(), stream, socket_addr);
+        let handler = ClientHandler::on_connect(
+            id,
+            "Client".to_string(),
+            stream,
+            socket_addr,
+            gameserver_list,
+        );
 
         {
             let handler = handler.clone();
@@ -176,6 +194,7 @@ impl GateServer {
         let groupserver_handler = self.group_handler.clone();
         let (client_to_gate_tx, mut client_to_gate_rx) = mpsc::channel::<ClientGateCommands>(100);
         let client_tcp_connections_for_client_commands_handler = client_tcp_connections.clone();
+        let gameserver_list = self.game_servers.clone();
 
         tokio::spawn(async move {
             let client_tcp_connections = client_tcp_connections_for_client_commands_handler;
@@ -207,6 +226,7 @@ impl GateServer {
                     stream,
                     groupserver_handler.clone(),
                     client_to_gate_tx.clone(),
+                    gameserver_list.clone(),
                 )
                 .await;
             }
@@ -222,7 +242,7 @@ impl GateServer {
         let (group_to_gate_tx, mut group_to_gate_rx) = mpsc::channel::<GateGroupCommands>(100);
 
         let player_map = self.client_connections.clone();
-        let gate_server_name = "GateServer".to_string();
+        let gate_server_name = self.config.get_name();
         let gp_handler = self.group_handler.clone();
         tokio::spawn(async move {
             GroupServerHandler::start_connection_loop(
@@ -243,8 +263,85 @@ impl GateServer {
         });
     }
 
+    async fn start_game_server_connection_handler(&mut self) {
+        let (ip, port) = self.config.get_ip_and_port_for_game_server();
+
+        let connect_addr = format!("{}:{}", ip, port);
+
+        let (tcp_stream_tx, mut tcp_stream_rx) = tokio::sync::mpsc::channel::<TcpStream>(100);
+        let counter = self.game_server_counter.clone();
+
+        /*
+         * Start the TCP server, hand it off to a separate task
+         */
+        tokio::spawn(async move {
+            TcpServer::start(connect_addr, tcp_stream_tx).await.unwrap();
+        });
+
+        println!(
+            "{} {}",
+            "Ready to accept game server connections at port".green(),
+            port.to_string().green().underline(),
+        );
+
+        let game_server_list = self.game_servers.clone();
+        let (game_to_gate_tx, mut game_to_gate_rx) = mpsc::channel::<GameServerGateCommands>(100);
+
+        let gate_server_name = self.name.clone();
+        let player_list = self.client_connections.clone();
+
+        tokio::spawn(async move {
+            let gate_server_name = gate_server_name;
+            let game_server_list = game_server_list.clone();
+            let player_list = player_list;
+            while let Some(stream) = tcp_stream_rx.recv().await {
+                let id = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let gate_server_name = gate_server_name.clone();
+
+                GameServerHandler::handle_incoming_connection(
+                    id,
+                    stream,
+                    "GameServer".to_string(),
+                    game_server_list.clone(),
+                    game_to_gate_tx.clone(),
+                    gate_server_name,
+                    player_list.clone(),
+                );
+            }
+        });
+
+        let game_server_list = self.game_servers.clone();
+        let player_list = self.client_connections.clone();
+
+        tokio::spawn(async move {
+            let player_list = player_list;
+            while let Some(command) = game_to_gate_rx.recv().await {
+                match command {
+                    GameServerGateCommands::SendPacketToClient(player_id, packet) => {
+                        let player_list = player_list.clone();
+                        tokio::spawn(async move {
+                            let player_list = player_list.read().await;
+                            let player = player_list.get(&player_id).unwrap();
+                            let player = player.lock().await;
+
+                            player
+                                .logger
+                                .debug("Sending packet from GameServer to client");
+                            packet.inspect_with_logger(&player.logger);
+
+                            if player.send_data(packet).await.is_err() {
+                                player.logger.error("Failed to send packet to client");
+                            }
+                        });
+                    }
+                }
+            }
+        });
+    }
+
     pub async fn start(&mut self) -> anyhow::Result<()> {
         self.start_group_server_connection_handler().await;
+        self.start_game_server_connection_handler().await;
         let client_connection_handle = self.start_client_connection_handler().await;
 
         client_connection_handle.await?;

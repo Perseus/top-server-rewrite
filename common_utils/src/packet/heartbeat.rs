@@ -5,7 +5,7 @@ use anyhow::anyhow;
 pub struct HeartbeatPacket {}
 
 impl super::TypedPacket for HeartbeatPacket {
-    fn from(base_packet: super::BasePacket) -> anyhow::Result<Self>
+    fn from_base_packet(base_packet: super::BasePacket) -> anyhow::Result<Self>
     where
         Self: Sized,
     {

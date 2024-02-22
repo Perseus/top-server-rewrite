@@ -11,7 +11,7 @@ impl InitClientPacket {
 }
 
 impl TypedPacket for InitClientPacket {
-    fn from(base_packet: BasePacket) -> anyhow::Result<Self>
+    fn from_base_packet(base_packet: BasePacket) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
@@ -46,7 +46,7 @@ impl InitGroupPacket {
 }
 
 impl TypedPacket for InitGroupPacket {
-    fn from(base_packet: BasePacket) -> anyhow::Result<Self>
+    fn from_base_packet(base_packet: BasePacket) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
@@ -110,7 +110,7 @@ impl SyncPlayerListToGroupServerPacket {
 }
 
 impl TypedPacket for SyncPlayerListToGroupServerPacket {
-    fn from(base_packet: BasePacket) -> anyhow::Result<Self>
+    fn from_base_packet(base_packet: BasePacket) -> anyhow::Result<Self>
     where
         Self: Sized,
     {

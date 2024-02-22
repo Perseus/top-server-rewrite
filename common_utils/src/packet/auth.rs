@@ -11,7 +11,7 @@ impl ClientMapCrashPacket {
 }
 
 impl TypedPacket for ClientMapCrashPacket {
-    fn from(base_packet: super::BasePacket) -> anyhow::Result<Self>
+    fn from_base_packet(base_packet: super::BasePacket) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
@@ -41,7 +41,7 @@ impl ClientLoginErrorPacket {
 }
 
 impl TypedPacket for ClientLoginErrorPacket {
-    fn from(base_packet: super::BasePacket) -> anyhow::Result<Self>
+    fn from_base_packet(base_packet: super::BasePacket) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
@@ -80,7 +80,7 @@ impl ClientDisconnectedForGroupPacket {
 }
 
 impl TypedPacket for ClientDisconnectedForGroupPacket {
-    fn from(base_packet: super::BasePacket) -> anyhow::Result<Self>
+    fn from_base_packet(base_packet: super::BasePacket) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
@@ -118,7 +118,7 @@ impl ClientLogoutFromGroupPacket {
 }
 
 impl TypedPacket for ClientLogoutFromGroupPacket {
-    fn from(base_packet: super::BasePacket) -> anyhow::Result<Self>
+    fn from_base_packet(base_packet: super::BasePacket) -> anyhow::Result<Self>
     where
         Self: Sized,
     {

@@ -20,6 +20,8 @@ use common_utils::{
 use tokio::sync::{mpsc, Mutex, RwLock};
 
 use crate::{
+    gameserver::GameServerList,
+    gameserver_handler::GameServerHandler,
     gate_commands::GateCommands,
     gate_server::{GateServer, SUPPORTED_CLIENT_VERSION},
     groupserver_handler::{self, GroupServerHandler},
@@ -31,6 +33,7 @@ pub struct ClientHandler {
     connection: Arc<Mutex<TcpConnection<Player>>>,
     gate_comm_tx: Option<mpsc::Sender<ClientGateCommands>>,
     groupserver_handler: Option<Arc<RwLock<GroupServerHandler>>>,
+    gameserver_list: Arc<RwLock<GameServerList>>,
 }
 
 pub enum ClientGateCommands {
@@ -38,11 +41,15 @@ pub enum ClientGateCommands {
 }
 
 impl ClientHandler {
-    pub fn new(connection: Arc<Mutex<TcpConnection<Player>>>) -> ClientHandler {
+    pub fn new(
+        connection: Arc<Mutex<TcpConnection<Player>>>,
+        gameserver_list: Arc<RwLock<GameServerList>>,
+    ) -> ClientHandler {
         ClientHandler {
             connection,
             gate_comm_tx: None,
             groupserver_handler: None,
+            gameserver_list,
         }
     }
 
@@ -58,13 +65,13 @@ impl ClientHandler {
     }
 }
 
-#[async_trait]
-impl ConnectionHandler<Player, ClientGateCommands> for ClientHandler {
-    fn on_connect(
+impl ClientHandler {
+    pub fn on_connect(
         id: u32,
         connection_type: String,
         stream: tokio::net::TcpStream,
         socket: std::net::SocketAddr,
+        gameserver_list: Arc<RwLock<GameServerList>>,
     ) -> Arc<RwLock<Self>> {
         let mut tcp_connection = TcpConnection::<Player>::new(
             id,
@@ -81,15 +88,17 @@ impl ConnectionHandler<Player, ClientGateCommands> for ClientHandler {
         let player = Player::new();
         tcp_connection.set_application_context(player);
 
-        Arc::new(RwLock::new(ClientHandler::new(Arc::new(Mutex::new(
-            tcp_connection,
-        )))))
+        Arc::new(RwLock::new(ClientHandler::new(
+            Arc::new(Mutex::new(tcp_connection)),
+            gameserver_list,
+        )))
     }
 
-    async fn on_connected(
+    pub async fn on_connected(
         handler: Arc<RwLock<Self>>,
         gate_comm_tx: mpsc::Sender<ClientGateCommands>,
     ) -> anyhow::Result<()> {
+        println!("on connected for client");
         // channel where we get data from the client (recv)
         // separate thread pulling data from the client TCP connection, where a thread consumes it, converts it into a BasePacket, and then pushes it to recv_tx, and can be consumed through recv_rx
         let (recv_tx, mut recv_rx) = mpsc::channel(100);
@@ -135,7 +144,7 @@ impl ConnectionHandler<Player, ClientGateCommands> for ClientHandler {
                 readable_handler.on_data(packet);
             }
 
-            println!("{}", "Client channel closed");
+            println!("Client channel closed");
         });
 
         Ok(())
@@ -160,7 +169,17 @@ impl ConnectionHandler<Player, ClientGateCommands> for ClientHandler {
             Some(Command::CTGTLogin) => {
                 self.handle_user_login(packet);
             }
+
+            Some(Command::CTGTSelectCharacter) => {
+                self.handle_select_character(packet);
+            }
+
             Some(Command::None) => {
+                let raw_cmd = packet.get_raw_cmd();
+                if (1..=500).contains(&raw_cmd) {
+                    self.send_packet_to_gameserver(packet);
+                    return;
+                }
                 self.handle_disconnect();
             }
             Some(cmd) => {
@@ -179,6 +198,27 @@ impl ConnectionHandler<Player, ClientGateCommands> for ClientHandler {
 }
 
 impl ClientHandler {
+    fn send_packet_to_gameserver(&self, mut packet: BasePacket) {
+        let connection = self.connection.clone();
+        tokio::spawn(async move {
+            let connection = connection.lock().await;
+            let player = connection.get_application_context().unwrap();
+
+            if let Some(game_server) = player.get_current_game_server() {
+                let game_server = game_server.read().await;
+                let connection = game_server.get_connection();
+                let connection = connection.read().await;
+                if connection.send_data(packet).await.is_err() {
+                    connection.logger.error(&format!(
+                        "Error sending packet to game server: {} for player: {}",
+                        connection.get_id(),
+                        player.get_login_id()
+                    ));
+                }
+            }
+        });
+    }
+
     fn handle_user_login(&self, mut packet: BasePacket) {
         let connection = self.connection.clone();
         let gpserver_handler = self.groupserver_handler.clone().unwrap();
@@ -313,7 +353,6 @@ impl ClientHandler {
                     ip_addr_as_u32,
                 );
 
-                println!("Player logged in: {:?}", updated_player);
                 conn.set_application_context(updated_player);
                 result.discard_last(12 + 1 + 2 + (comm_key_length as usize) + 2);
 
@@ -382,6 +421,118 @@ impl ClientHandler {
                 .send(ClientGateCommands::Disconnect(conn.get_id()))
                 .await
                 .unwrap();
+        });
+    }
+
+    fn handle_select_character(&self, mut packet: BasePacket) {
+        /**
+         * 1. Check if the player is on the character selection screen
+         *  (is_active should be true)
+         *  (group_addr should not be 0)
+         *
+         * 2. Make a sync RPC to the GroupServer
+         *    
+         * 3. Extract data from response (map, world id etc)
+         *
+         * 4. If the map isnt found in any running game servers, send error
+         *
+         * 5. If the number of players in that gameserver is greater than some amount, send error
+         *
+         * 6.
+         */
+        let connection = self.connection.clone();
+        let gpserver_handler = self.groupserver_handler.clone().unwrap();
+        let gameserver_list = self.gameserver_list.clone();
+
+        tokio::spawn(async move {
+            let mut connection = connection.lock().await;
+            let player = connection.get_application_context().unwrap();
+            let mut begin_ply_pkt_for_group = packet.duplicate();
+            let connection_id = connection.get_id();
+            let logger = &connection.logger;
+            begin_ply_pkt_for_group.reset_header();
+            begin_ply_pkt_for_group
+                .write_cmd(Command::GTTGPUserBeginPlay)
+                .unwrap();
+            begin_ply_pkt_for_group
+                .write_long(connection.get_id())
+                .unwrap();
+            begin_ply_pkt_for_group
+                .write_long(player.get_group_addr())
+                .unwrap();
+
+            let gpserver_handler = gpserver_handler.read().await;
+            let mut result = gpserver_handler
+                .sync_rpc(begin_ply_pkt_for_group)
+                .await
+                .unwrap();
+
+            result.inspect_with_logger(&connection.logger);
+
+            if !result.has_data() {
+                connection.logger.error("No data from group server");
+                return;
+            }
+
+            let err_code = result.read_short().unwrap();
+            if err_code != 0 {
+                logger.error("Got an error from GroupServer in handle_select_character");
+            }
+
+            let player_password = result.read_string().unwrap();
+            let player_db_id = result.read_long().unwrap();
+            let player_world_id = result.read_long().unwrap();
+            let player_map_name = result.read_string().unwrap();
+            let garner_winner = result.read_short().unwrap();
+
+            let player = connection.get_application_context_mut().unwrap();
+            player.set_begin_play_context(
+                player_password,
+                player_db_id,
+                player_world_id,
+                garner_winner,
+            );
+
+            let game_servers = gameserver_list.read().await;
+            if let Some(game_server) = game_servers
+                .find_game_server_with_map(player_map_name.clone())
+                .await
+            {
+                let mut kick_character_pkt = BasePacket::new();
+                kick_character_pkt
+                    .write_cmd(Command::GTTGMKickCharacter)
+                    .unwrap();
+                kick_character_pkt.write_long(player_db_id).unwrap();
+                kick_character_pkt.build_packet().unwrap();
+                let responses = game_servers.send_to_all_game_servers_sync(packet).await;
+
+                if responses.is_err() {
+                    connection
+                        .logger
+                        .error("Error sending kick character packet");
+                    return;
+                }
+
+                if let Ok(()) = GameServerHandler::enter_map(
+                    game_server.clone(),
+                    connection_id,
+                    player,
+                    player.get_account_id(),
+                    player_db_id,
+                    player_world_id,
+                    player_map_name,
+                    -1,
+                    0,
+                    0,
+                    0,
+                    garner_winner,
+                )
+                .await
+                {}
+            } else {
+                println!("Map not found for player, {}", player_map_name);
+                todo!("handle gameserver for map not found");
+            }
         });
     }
 }

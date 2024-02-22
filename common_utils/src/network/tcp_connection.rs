@@ -143,7 +143,7 @@ impl<T> TcpConnection<T> {
                             if let Ok(num_bytes_written) = stream_writer.try_write(packet_as_slice){
                                 stream_writer.flush().await.unwrap();
                                 if num_bytes_written > 2 {
-                                    logger.debug("Sent packet to client");
+                                    logger.debug("Sent packet to connection");
                                 }
                             } else {
                                 println!("Error writing to stream");
@@ -190,6 +190,7 @@ impl<T> TcpConnection<T> {
                                         continue;
                                     }
 
+
                                     let packet = BasePacket::parse_frame(&mut buffer, n).unwrap();
                                     let mut rpc_mgr = rpc_mgr.lock().await;
 
@@ -205,7 +206,6 @@ impl<T> TcpConnection<T> {
 
                                     buffer.advance(n);
                                     data_recv_tx.send(packet).await.unwrap();
-                                    logger.debug("Sent packet to data channel");
                                 }
                             }
 
@@ -233,11 +233,15 @@ impl<T> TcpConnection<T> {
         self.application_context.as_ref()
     }
 
+    pub fn get_application_context_mut(&mut self) -> Option<&mut T> {
+        self.application_context.as_mut()
+    }
+
     pub fn get_id(&self) -> u32 {
         self.id
     }
 
-    pub async fn send_data(&mut self, packet: BasePacket) -> anyhow::Result<()> {
+    pub async fn send_data(&self, packet: BasePacket) -> anyhow::Result<()> {
         if let Some(send_channel) = &self.send_channel {
             send_channel.send(packet).await?;
             Ok(())
@@ -260,7 +264,7 @@ impl<T> TcpConnection<T> {
         self.is_ready
     }
 
-    pub async fn sync_rpc(&mut self, packet: BasePacket) -> anyhow::Result<BasePacket> {
+    pub async fn sync_rpc(&self, packet: BasePacket) -> anyhow::Result<BasePacket> {
         if let Some(mut rpc_mgr) = self.rpc_mgr.clone() {
             rpc_mgr = rpc_mgr.clone();
             // every packet gets a "SESSIONID" appended to it

@@ -29,7 +29,13 @@ pub struct GameServerConfig {
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
+pub struct MainConfig {
+    name: String,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
 pub struct GateServerConfig {
+    pub main: MainConfig,
     pub group_config: GroupConfig,
     pub client_config: ClientConfig,
     pub game_server_config: GameServerConfig,
@@ -42,6 +48,14 @@ impl GateServerConfig {
 
     pub fn get_server_ip_and_port_for_group_server(&self) -> (Ipv4Addr, u16) {
         (self.group_config.ip, self.group_config.port)
+    }
+
+    pub fn get_ip_and_port_for_game_server(&self) -> (Ipv4Addr, u16) {
+        (self.game_server_config.ip, self.game_server_config.port)
+    }
+
+    pub fn get_name(&self) -> String {
+        self.main.name.clone()
     }
 }
 

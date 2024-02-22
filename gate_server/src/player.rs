@@ -1,4 +1,9 @@
+use std::sync::Arc;
+
 use chrono::{Datelike, Local, Timelike};
+use tokio::sync::RwLock;
+
+use crate::gameserver_handler::GameServerHandler;
 
 #[derive(Debug)]
 pub struct Player {
@@ -10,6 +15,11 @@ pub struct Player {
     comm_text_key: String,
     is_active: bool,
     ip_addr: u32,
+    password: String,
+    db_id: u32,
+    world_id: u32,
+    garner_winner: u16,
+    current_game_server: Option<Arc<RwLock<GameServerHandler>>>,
 }
 
 impl Player {
@@ -34,6 +44,11 @@ impl Player {
             comm_text_key: "".to_string(),
             ip_addr: 0,
             is_active: false,
+            password: "".to_string(),
+            db_id: 0,
+            world_id: 0,
+            garner_winner: 0,
+            current_game_server: None,
         }
     }
 
@@ -61,6 +76,18 @@ impl Player {
         self.group_addr
     }
 
+    pub fn get_password(&self) -> String {
+        self.password.clone()
+    }
+
+    pub fn set_current_game_server(&mut self, game_server: Arc<RwLock<GameServerHandler>>) {
+        self.current_game_server = Some(game_server);
+    }
+
+    pub fn get_current_game_server(&self) -> Option<Arc<RwLock<GameServerHandler>>> {
+        self.current_game_server.clone()
+    }
+
     pub fn set_logged_in_context(
         &mut self,
         group_addr: u32,
@@ -77,6 +104,19 @@ impl Player {
         self.comm_text_key = comm_text_key;
         self.ip_addr = ip_addr;
         self.is_active = true;
+    }
+
+    pub fn set_begin_play_context(
+        &mut self,
+        password: String,
+        db_id: u32,
+        world_id: u32,
+        garner_winner: u16,
+    ) {
+        self.password = password;
+        self.db_id = db_id;
+        self.world_id = world_id;
+        self.garner_winner = garner_winner;
     }
 
     pub fn is_active(&self) -> bool {
