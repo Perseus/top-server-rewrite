@@ -237,10 +237,15 @@ impl BasePacket {
     /// Removes all bytes in the range from the buffer
     /// RESETS THE OFFSET
     pub fn remove_range(&mut self, range: std::ops::Range<usize>) {
+        // we don't allow removing bytes before the data
+        if range.start < 8 {
+            return;
+        }
+
         let mut remaining_bytes = self.data.split_off(range.start);
         let end_bytes = remaining_bytes.split_off(range.end - range.start);
         self.data.unsplit(end_bytes);
-        self.offset = 0;
+        self.offset = 8;
 
         self.set_len(self.data.len() as u16);
     }
@@ -258,14 +263,19 @@ impl BasePacket {
     }
 
     pub fn inspect_with_logger(&self, logger: &Logger) {
-        logger.debug("------ Inspected Packet -------");
-        logger.debug(format!("[Packet] Size: {}", self.size).as_str());
-        logger.debug(format!("[Packet] Header: {:?}", self.data.get(2..6)).as_str());
-        logger.debug(format!("[Packet] Command: {:?}", self.data.get(6..8)).as_str());
-        logger.debug(format!("[Packet] Data: {:?}", self.data.get(8..self.size as usize)).as_str());
-        logger.debug(format!("[Packet] Offset: {:?}", self.offset).as_str());
-        logger.debug(format!("[Packet] Reverse Offset: {:?}", self.reverse_offset).as_str());
-        logger.debug("-------------------------------");
+        logger.debug(
+            &format!(
+                "------ Inspected Packet -------\n\t\t\t\t\t[Packet] Size: {}\n\t\t\t\t\t[Packet] Header: {:?}\n\t\t\t\t\t[Packet] Command: {:?}\n\t\t\t\t\t[Packet] Raw Command: {}\n\t\t\t\t\t[Packet] Data: {:?}\n\t\t\t\t\t[Packet] Offset: {:?}\n\t\t\t\t\t[Packet] Reverse Offset: {:?}\n\t\t\t\t\t-------------------------------",
+                self.size,
+                self.data.get(2..6),
+                self.data.get(6..8),
+                self.raw_cmd,
+                self.data.get(8..self.size as usize),
+                self.offset,
+                self.reverse_offset
+
+            )
+        );
     }
 
     pub fn inspect(&self) {
@@ -273,6 +283,7 @@ impl BasePacket {
         println!("[Packet] Size: {}", self.size);
         println!("[Packet] Header: {:?}", self.data.get(2..6));
         println!("[Packet] Command: {:?}", self.data.get(6..8));
+        println!("[Packet] Raw Command: {}", self.raw_cmd);
         println!("[Packet] Data: {:?}", self.data.get(8..self.size as usize));
         println!("[Packet] Offset: {:?}", self.offset);
         println!("[Packet] Reverse Offset: {:?}", self.reverse_offset);
@@ -306,7 +317,6 @@ impl PacketReader for BasePacket {
 
                 return Some(command);
             } else {
-                println!("Unknown command -> {}", primitive_command);
                 self.increment_offset::<u16>();
                 self.cmd = Command::None;
 
@@ -647,6 +657,7 @@ impl PacketWriter for BasePacket {
 
         self.data = byte_buffer;
         self.is_built = true;
+        self.size = size;
 
         Ok(())
     }

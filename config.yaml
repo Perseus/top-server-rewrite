@@ -1,0 +1,23 @@
+main:
+  name: "GateServer2"
+
+client_config:
+  ip: "127.0.0.1"
+  ddos_protection: true
+  max_connections: 500
+  max_login_per_ip: 50
+  ping_duration: 180
+  port: 1973
+  wpe_protection: true
+  wpe_version: 30
+
+group_config:
+  ip: "172.24.80.1"
+  port: 1975 
+  ping_duration: 180
+
+game_server_config:
+  ip: "127.0.0.1"
+  port: 3002
+  ping_duration: 180
+

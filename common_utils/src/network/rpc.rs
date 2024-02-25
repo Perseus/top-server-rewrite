@@ -85,6 +85,12 @@ pub struct RPCManager {
     logger: Logger,
 }
 
+impl Drop for RPCManager {
+    fn drop(&mut self) {
+        self.logger.debug("RPCManager dropped");
+    }
+}
+
 impl RPCManager {
     pub fn new(rpc_send_tx: mpsc::Sender<BasePacket>) -> Self {
         RPCManager {
@@ -148,6 +154,14 @@ impl RPCManager {
                 rpc_call.finished_notification.notify_one();
 
                 return Ok(());
+            } else {
+                self.logger.debug(
+                    format!(
+                        "[sess_id={}] Received RPC reply for unknown session id",
+                        session_id
+                    )
+                    .as_str(),
+                );
             }
         }
 

@@ -26,13 +26,7 @@ impl TcpClient {
         }
     }
 
-    pub async fn connect<HandlerType, ApplicationContextType, CommandChannelType>(
-        &mut self,
-        retry_interval_in_secs: u64,
-    ) -> anyhow::Result<TcpStream>
-    where
-        HandlerType: ConnectionHandler<ApplicationContextType, CommandChannelType>,
-    {
+    pub async fn connect(&mut self, retry_interval_in_secs: u64) -> anyhow::Result<TcpStream> {
         loop {
             match TcpStream::connect(format!("{}:{}", self.target_ip, self.target_port)).await {
                 Ok(stream) => {

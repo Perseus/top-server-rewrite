@@ -168,3 +168,44 @@ impl TypedPacket for GameServerEnterMapResultPacket {
         unimplemented!()
     }
 }
+
+pub struct GameServerLeaveMapPacket {
+    is_character_offline: u8,
+    player_addr: u32,
+    gm_addr: u32,
+}
+
+impl GameServerLeaveMapPacket {
+    pub fn new(is_character_offline: u8, player_addr: u32, gm_addr: u32) -> Self {
+        Self {
+            is_character_offline,
+            player_addr,
+            gm_addr,
+        }
+    }
+}
+
+impl TypedPacket for GameServerLeaveMapPacket {
+    fn from_base_packet(mut base_packet: common_utils::packet::BasePacket) -> anyhow::Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(Self {
+            is_character_offline: base_packet.read_char().unwrap(),
+            player_addr: base_packet.read_long().unwrap(),
+            gm_addr: base_packet.read_long().unwrap(),
+        })
+    }
+
+    fn to_base_packet(&self) -> anyhow::Result<BasePacket> {
+        let mut base_packet = BasePacket::new();
+
+        base_packet.write_cmd(commands::Command::GTTGMPlayerLeaveMap)?;
+        base_packet.write_char(self.is_character_offline)?;
+        base_packet.write_long(self.player_addr)?;
+        base_packet.write_long(self.gm_addr)?;
+        base_packet.build_packet()?;
+
+        Ok(base_packet)
+    }
+}

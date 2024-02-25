@@ -1,9 +1,16 @@
 use std::sync::Arc;
 
 use chrono::{Datelike, Local, Timelike};
-use tokio::sync::RwLock;
+use tokio::{sync::RwLock, time::Instant};
 
 use crate::gameserver_handler::GameServerHandler;
+
+#[derive(Debug, PartialEq)]
+pub enum CurrentScreen {
+    None,
+    CharacterSelection,
+    InGame,
+}
 
 #[derive(Debug)]
 pub struct Player {
@@ -13,13 +20,15 @@ pub struct Player {
     group_addr: u32,
     comm_key_len: u16,
     comm_text_key: String,
-    is_active: bool,
+    current_screen: CurrentScreen,
     ip_addr: u32,
     password: String,
     db_id: u32,
     world_id: u32,
     garner_winner: u16,
     current_game_server: Option<Arc<RwLock<GameServerHandler>>>,
+    game_addr: u32,
+    group_last_pinged_time: Instant,
 }
 
 impl Player {
@@ -43,13 +52,19 @@ impl Player {
             comm_key_len: 0,
             comm_text_key: "".to_string(),
             ip_addr: 0,
-            is_active: false,
+            current_screen: CurrentScreen::None,
             password: "".to_string(),
             db_id: 0,
             world_id: 0,
             garner_winner: 0,
             current_game_server: None,
+            game_addr: 0,
+            group_last_pinged_time: Instant::now(),
         }
+    }
+
+    pub fn unset_game_server(&mut self) {
+        self.current_game_server = None;
     }
 
     pub fn get_chapstr(&self) -> String {
@@ -64,6 +79,10 @@ impl Player {
         self.login_id
     }
 
+    pub fn get_db_id(&self) -> u32 {
+        self.db_id
+    }
+
     pub fn get_account_id(&self) -> u32 {
         self.account_id
     }
@@ -76,12 +95,29 @@ impl Player {
         self.group_addr
     }
 
+    pub fn get_game_addr(&self) -> u32 {
+        self.game_addr
+    }
+
     pub fn get_password(&self) -> String {
         self.password.clone()
     }
 
-    pub fn set_current_game_server(&mut self, game_server: Arc<RwLock<GameServerHandler>>) {
+    pub fn get_last_group_pinged_time(&self) -> Instant {
+        self.group_last_pinged_time
+    }
+
+    pub fn reset_last_group_pinged_time(&mut self) {
+        self.group_last_pinged_time = Instant::now();
+    }
+
+    pub fn set_current_game_server(
+        &mut self,
+        game_server: Arc<RwLock<GameServerHandler>>,
+        game_addr: u32,
+    ) {
         self.current_game_server = Some(game_server);
+        self.game_addr = game_addr;
     }
 
     pub fn get_current_game_server(&self) -> Option<Arc<RwLock<GameServerHandler>>> {
@@ -103,7 +139,7 @@ impl Player {
         self.comm_key_len = comm_key_len;
         self.comm_text_key = comm_text_key;
         self.ip_addr = ip_addr;
-        self.is_active = true;
+        self.current_screen = CurrentScreen::CharacterSelection;
     }
 
     pub fn set_begin_play_context(
@@ -120,6 +156,14 @@ impl Player {
     }
 
     pub fn is_active(&self) -> bool {
-        self.is_active
+        self.current_screen != CurrentScreen::None
+    }
+
+    pub fn is_in_game(&self) -> bool {
+        self.current_screen == CurrentScreen::InGame
+    }
+
+    pub fn set_current_screen(&mut self, current_screen: CurrentScreen) {
+        self.current_screen = current_screen;
     }
 }

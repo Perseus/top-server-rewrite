@@ -7,6 +7,9 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 pub enum Command {
     None,
 
+    // Client to GameServer
+    // CTGMBeginAction = 6,
+
     // Client to GateServer
     CTGTLogin = 431,
     CTGTSelectCharacter = 433,
@@ -29,11 +32,20 @@ pub enum Command {
 
     // GameServer to GateServer
     GMTGTInit = 1501,
+    GMTGTMapEntry = 1506,
 
     // GateServer to GameServer
+    GTTGMPlayerLeaveMap = 1004,
     GTTGMInitAcknowledge = 1005,
+    GTTGMMapEntry = 1007,
     GTTGMPlayerEnterMap = 1003,
     GTTGMKickCharacter = 1009,
+
+    // GameServer to GroupServer
+    GMTGPPlayerEnterMap = 5501,
+
+    // Client to GroupServer
+    CTGPPing = 6020,
 }
 
 impl Display for Command {

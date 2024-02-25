@@ -42,6 +42,15 @@ pub struct TcpConnection<T> {
 
 const MAX_PACKET_SIZE: usize = 8192;
 
+impl<T> Drop for TcpConnection<T> {
+    fn drop(&mut self) {
+        self.logger.info(&format!(
+            "Dropping connection for {}.{}",
+            self.connection_type, self.id
+        ));
+    }
+}
+
 impl<T> TcpConnection<T> {
     pub fn new(
         id: u32,
@@ -192,10 +201,12 @@ impl<T> TcpConnection<T> {
 
 
                                     let packet = BasePacket::parse_frame(&mut buffer, n).unwrap();
+                                    logger.debug("Received packet from connection");
                                     let mut rpc_mgr = rpc_mgr.lock().await;
 
                                     let is_for_rpc = rpc_mgr.check_packet_for_rpc_response(&packet).await;
                                     if is_for_rpc {
+                                        logger.debug("packet is for rpc");
                                         if let Ok(()) = rpc_mgr.handle_rpc_reply(packet).await {
                                             buffer.advance(n);
                                             continue;
@@ -205,6 +216,7 @@ impl<T> TcpConnection<T> {
                                     }
 
                                     buffer.advance(n);
+
                                     data_recv_tx.send(packet).await.unwrap();
                                 }
                             }
@@ -252,6 +264,10 @@ impl<T> TcpConnection<T> {
 
     pub async fn close(&mut self, delay_in_ms: Duration) {
         tokio::time::sleep(delay_in_ms).await;
+        self.logger.info(&format!(
+            "Closing connection for {}.{}",
+            self.connection_type, self.id
+        ));
         self.cancellation_token.cancel();
     }
 

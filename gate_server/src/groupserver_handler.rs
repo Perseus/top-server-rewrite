@@ -6,6 +6,7 @@ use common_utils::{
         tcp_server::*,
     },
     packet::{
+        commands::Command,
         init::{InitGroupPacket, PlayerForGroupServer, SyncPlayerListToGroupServerPacket},
         *,
     },
@@ -29,15 +30,17 @@ pub enum GateGroupCommands {}
 pub struct GroupServerHandler {
     connection: Arc<RwLock<Option<TcpConnection<GroupServer>>>>,
     gate_commands_tx: Option<mpsc::Sender<GateGroupCommands>>,
+    player_map: PlayerConnectionMap,
     should_sync_player_list: bool,
 }
 
 impl GroupServerHandler {
-    pub fn new() -> Self {
+    pub fn new(player_map: PlayerConnectionMap) -> Self {
         GroupServerHandler {
             connection: Arc::new(RwLock::new(None)),
             gate_commands_tx: None,
             should_sync_player_list: true,
+            player_map,
         }
     }
 
@@ -50,6 +53,10 @@ impl GroupServerHandler {
     pub async fn send_data(&self, packet: BasePacket) -> anyhow::Result<()> {
         let mut write_lock = self.connection.write().await;
         let connection = write_lock.as_mut().unwrap();
+
+        connection.logger.debug("Sending packet to GroupServer");
+        packet.inspect_with_logger(&connection.logger);
+
         connection.send_data(packet).await
     }
 
@@ -59,10 +66,7 @@ impl GroupServerHandler {
 
     async fn connect(&self, ip: Ipv4Addr, port: u16) {
         let mut client = TcpClient::new(1, "GroupServer".to_string(), ip, port);
-        let stream = client
-            .connect::<GroupServerHandler, GroupServer, GateGroupCommands>(5)
-            .await
-            .unwrap();
+        let stream = client.connect(5).await.unwrap();
 
         let socket_addr = stream.peer_addr().unwrap();
 
@@ -201,7 +205,7 @@ impl GroupServerHandler {
             let connection = player_conn.clone();
 
             join_set.spawn(async move {
-                let player_conn = connection.lock().await;
+                let player_conn = connection.read().await;
                 let player = player_conn.get_application_context().unwrap();
                 PlayerForGroupServer {
                     player_pointer: player_id,
@@ -235,32 +239,6 @@ impl GroupServerHandler {
 
             self.should_sync_player_list = false;
         }
-    }
-}
-
-#[async_trait]
-impl ConnectionHandler<GroupServer, GateGroupCommands> for GroupServerHandler {
-    // This is not used, because we're directly creating the handler in the GateServer
-    // which is then passed to the clients etc.
-    fn on_connect(
-        id: u32,
-        server_type: String,
-        stream: tokio::net::TcpStream,
-        socket: std::net::SocketAddr,
-    ) -> Arc<RwLock<Self>> {
-        let handler = Arc::new(RwLock::new(Self::new()));
-        let mut connection = TcpConnection::new(
-            id,
-            server_type,
-            stream,
-            socket,
-            "GroupServer".to_string(),
-            Color::Magenta,
-        );
-        let group_server = GroupServer::new();
-        connection.set_application_context(group_server);
-
-        handler
     }
 
     async fn on_connected(
@@ -315,13 +293,48 @@ impl ConnectionHandler<GroupServer, GateGroupCommands> for GroupServerHandler {
         Ok(())
     }
 
-    fn on_data(&self, packet: BasePacket) {
-        let conn = self.connection.clone();
+    fn on_data(&self, mut packet: BasePacket) {
+        match packet.read_cmd() {
+            Some(Command::None) => {
+                let raw_cmd = packet.get_raw_cmd();
+                if (5000..=5500).contains(&raw_cmd) {
+                    self.send_packet_to_client(packet);
+                }
+            }
+
+            Some(_) => {}
+
+            None => {}
+        }
+    }
+
+    fn send_packet_to_client(&self, mut packet: BasePacket) {
+        let player_list = self.player_map.clone();
         tokio::spawn(async move {
-            let read_lock = conn.read().await;
-            let connection = read_lock.as_ref().unwrap();
-            connection.logger.debug("Received packet");
-            packet.inspect_with_logger(&connection.logger);
+            let mut pkt_to_send_to_client = packet.clone();
+            let num_players_to_send_packet_to = packet.reverse_read_short().unwrap();
+
+            // we need to discard the last 2 bytes +
+            // 8 bytes for each player (4 bytes for player_id, 4 bytes for group_addr)
+            pkt_to_send_to_client.discard_last((num_players_to_send_packet_to as usize * 8) + 2);
+            pkt_to_send_to_client.build_packet().unwrap();
+            let player_list = player_list.read().await;
+
+            for _ in 0..num_players_to_send_packet_to {
+                let player_id = packet.reverse_read_long().unwrap();
+                let group_addr = packet.reverse_read_long().unwrap();
+
+                // TODO: parallelize
+                if let Some(player_conn) = player_list.get(&player_id) {
+                    let player_conn = player_conn.read().await;
+
+                    let player = player_conn.get_application_context().unwrap();
+
+                    if player.get_group_addr() == group_addr {
+                        let _ = player_conn.send_data(pkt_to_send_to_client.clone()).await;
+                    }
+                }
+            }
         });
     }
 }

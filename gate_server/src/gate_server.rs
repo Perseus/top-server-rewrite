@@ -45,7 +45,7 @@ pub const MAXIMUM_MAPS_PER_GAMESERVER: u16 = 100;
  * add their entry to the map.
  */
 
-pub type PlayerConnection = Arc<Mutex<TcpConnection<Player>>>;
+pub type PlayerConnection = Arc<RwLock<TcpConnection<Player>>>;
 pub type PlayerConnectionMap = Arc<RwLock<HashMap<u32, PlayerConnection>>>;
 
 pub struct GateServer {
@@ -73,14 +73,17 @@ impl GateServer {
             path.green().underline(),
         );
         let config = config::parse_config(Path::new(path));
+        let client_connections = Arc::new(RwLock::new(HashMap::new()));
 
         GateServer {
             name: config.get_name(),
             config,
             player_num_counter: Arc::new(AtomicU32::new(1)),
             game_server_counter: Arc::new(AtomicU32::new(1)),
-            client_connections: Arc::new(RwLock::new(HashMap::new())),
-            group_handler: Arc::new(RwLock::new(GroupServerHandler::new())),
+            group_handler: Arc::new(RwLock::new(GroupServerHandler::new(
+                client_connections.clone(),
+            ))),
+            client_connections,
             game_servers: Arc::new(RwLock::new(GameServerList::new())),
         }
     }
@@ -203,7 +206,7 @@ impl GateServer {
                     ClientGateCommands::Disconnect(id) => {
                         let mut map = client_tcp_connections.write().await;
                         if let Some(connection) = map.remove(&id) {
-                            let mut connection = connection.lock().await;
+                            let mut connection = connection.write().await;
                             connection.close(Duration::ZERO).await;
                         }
                     }
@@ -312,9 +315,11 @@ impl GateServer {
 
         let game_server_list = self.game_servers.clone();
         let player_list = self.client_connections.clone();
+        let group_handler = self.group_handler.clone();
 
         tokio::spawn(async move {
             let player_list = player_list;
+            let group_handler = group_handler;
             while let Some(command) = game_to_gate_rx.recv().await {
                 match command {
                     GameServerGateCommands::SendPacketToClient(player_id, packet) => {
@@ -322,7 +327,7 @@ impl GateServer {
                         tokio::spawn(async move {
                             let player_list = player_list.read().await;
                             let player = player_list.get(&player_id).unwrap();
-                            let player = player.lock().await;
+                            let player = player.read().await;
 
                             player
                                 .logger
@@ -332,6 +337,14 @@ impl GateServer {
                             if player.send_data(packet).await.is_err() {
                                 player.logger.error("Failed to send packet to client");
                             }
+                        });
+                    }
+
+                    GameServerGateCommands::SendPacketToGroupServer(packet) => {
+                        let gp_handler = group_handler.clone();
+                        tokio::spawn(async move {
+                            let gp_handler = gp_handler.write().await;
+                            let _ = gp_handler.send_data(packet).await;
                         });
                     }
                 }

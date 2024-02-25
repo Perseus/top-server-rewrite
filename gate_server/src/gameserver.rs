@@ -51,7 +51,6 @@ impl GameServerList {
             let locked_server_connection = server_connection.read().await;
             let server_data = locked_server_connection.get_application_context().unwrap();
 
-            println!("Map list - {:?}", server_data.map_list);
             if server_data.map_list.contains(&map_name) {
                 return Some(server_handler.clone());
             }

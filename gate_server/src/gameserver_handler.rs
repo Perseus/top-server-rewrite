@@ -54,11 +54,18 @@ impl GameServerHandler {
 
 pub enum GameServerGateCommands {
     SendPacketToClient(u32, BasePacket),
+    SendPacketToGroupServer(BasePacket),
 }
 
 pub enum GameServerRejectionReason {
     DuplicateName,
     OverlappingMapList,
+}
+
+impl Drop for GameServerHandler {
+    fn drop(&mut self) {
+        println!("GameServerHandler: Dropped");
+    }
 }
 
 impl GameServerHandler {
@@ -81,15 +88,25 @@ impl GameServerHandler {
             let mut connection = connection.write().await;
 
             connection
-                .start_processing(data_recv_tx, data_send_rx, data_send_tx)
+                .start_processing(data_recv_tx, data_send_rx, data_send_tx.clone())
                 .await;
         })
         .await
         .unwrap();
 
         tokio::spawn(async move {
-            while let Some(packet) = data_recv_rx.recv().await {
-                GameServerHandler::on_data(handler.clone(), packet);
+            loop {
+                match data_recv_rx.recv().await {
+                    None => {
+                        println!(
+                            "GameServerHandler: Data receiver stopped due to connection closing"
+                        );
+                        break;
+                    }
+                    Some(packet) => {
+                        GameServerHandler::on_data(handler.clone(), packet);
+                    }
+                }
             }
 
             // what to do on disconnect?
@@ -99,15 +116,30 @@ impl GameServerHandler {
     }
 
     fn on_data(handler: Arc<RwLock<Self>>, mut packet: BasePacket) {
-        let cmd = packet.read_cmd().unwrap();
+        let cmd = packet.read_cmd();
         match cmd {
-            Command::GMTGTInit => {
+            Some(Command::GMTGTInit) => {
                 GameServerHandler::on_game_server_init(handler, packet);
             }
 
-            Command::GMTCEnterMap => GameServerHandler::on_enter_map_result(handler, packet),
+            Some(Command::GMTGTMapEntry) => {
+                GameServerHandler::on_map_entry(handler, packet);
+            }
+
+            Some(Command::GMTCEnterMap) => GameServerHandler::on_enter_map_result(handler, packet),
+
+            Some(Command::None) => {
+                let raw_cmd = packet.get_raw_cmd();
+                if (500..=1000).contains(&raw_cmd) {
+                    GameServerHandler::send_to_client(handler, packet);
+                }
+            }
+
             _ => {
-                println!("GameServerHandler: Unhandled command: {}", cmd);
+                println!(
+                    "GameServerHandler: Unhandled command: {}",
+                    packet.get_raw_cmd()
+                );
             }
         }
     }
@@ -185,6 +217,9 @@ impl GameServerHandler {
                 .check_for_duplicate_name_or_overlapping_maps(new_gameserver_data)
                 .await;
 
+            connection.mark_connected();
+
+            // drop the reference, so that the lock is released
             drop(connection);
 
             match rejection_reason {
@@ -242,6 +277,50 @@ impl GameServerHandler {
             .info("Acknowledged initialization for GameServer");
     }
 
+    pub fn send_to_client(handler: Arc<RwLock<Self>>, mut packet: BasePacket) {
+        tokio::spawn(async move {
+            let handler = handler.read().await;
+            let gameserver_connection = handler.connection.clone();
+            let gameserver_connection = gameserver_connection.read().await;
+            let raw_cmd = packet.get_raw_cmd();
+
+            if raw_cmd != 895 && raw_cmd != 511 && raw_cmd != 537 {
+                gameserver_connection
+                    .logger
+                    .debug("Got packet to send to client");
+                packet.inspect_with_logger(&gameserver_connection.logger);
+            }
+
+            let aim_num = packet.reverse_read_short().unwrap();
+
+            let mut pkt_for_client = packet.clone();
+            pkt_for_client.discard_last((4 * 2) * (aim_num as usize) + 2);
+
+            let client_list = handler.client_list.clone();
+            let client_list = client_list.read().await;
+
+            for _ in 0..aim_num {
+                let player_id = packet.reverse_read_long().unwrap();
+                let db_id = packet.reverse_read_long().unwrap();
+                if let Some(connection) = client_list.get(&player_id) {
+                    let connection = connection.read().await;
+                    let player = connection.get_application_context().unwrap();
+                    if player.get_db_id() == db_id {
+                        if connection.send_data(packet.clone()).await.is_err() {
+                            connection
+                                .logger
+                                .error("Unable to send packet to client, client was disconnected");
+                        }
+                    } else {
+                        println!("db id wasnt a match");
+                    }
+                } else {
+                    println!("client conneciton wasnt found for player id {}", player_id);
+                }
+            }
+        });
+    }
+
     pub async fn enter_map(
         handler: Arc<RwLock<Self>>,
         id: u32,
@@ -293,6 +372,7 @@ impl GameServerHandler {
             conn.logger
                 .debug(&format!("Enter map result: {:?}", client_pkt));
             if client_pkt.ret_code == 0 {
+                let game_addr = client_pkt.gm_addr.unwrap();
                 gate_server_comm_tx
                     .send(GameServerGateCommands::SendPacketToClient(
                         client_pkt.player_id,
@@ -303,15 +383,73 @@ impl GameServerHandler {
 
                 let player_list = player_list.write().await;
                 if let Some(connection) = player_list.get(&client_pkt.player_id) {
-                    let mut connection = connection.lock().await;
+                    let mut connection = connection.write().await;
                     let player = connection.get_application_context_mut().unwrap();
-                    player.set_current_game_server(handler.clone());
+                    player.set_current_game_server(handler.clone(), game_addr);
+
+                    let mut enter_map_pkt_for_group = BasePacket::new();
+                    enter_map_pkt_for_group
+                        .write_cmd(Command::GMTGPPlayerEnterMap)
+                        .unwrap();
+                    enter_map_pkt_for_group
+                        .write_char(client_pkt.is_switch.unwrap())
+                        .unwrap();
+                    enter_map_pkt_for_group
+                        .write_long(client_pkt.player_id)
+                        .unwrap();
+                    enter_map_pkt_for_group
+                        .write_long(player.get_group_addr())
+                        .unwrap();
+                    enter_map_pkt_for_group.build_packet().unwrap();
+
+                    let _ = gate_server_comm_tx
+                        .send(GameServerGateCommands::SendPacketToGroupServer(
+                            enter_map_pkt_for_group,
+                        ))
+                        .await;
                 }
             }
         });
     }
 
+    pub fn on_map_entry(handler: Arc<RwLock<Self>>, mut packet: BasePacket) {
+        tokio::spawn(async move {
+            let map_name = packet.read_string().unwrap();
+            let handler = handler.read().await;
+            let game_server_list = handler.game_server_list.clone();
+            let game_server_list = game_server_list.read().await;
+
+            if let Some(game_server_with_map) =
+                game_server_list.find_game_server_with_map(map_name).await
+            {
+                let mut pkt = packet.duplicate();
+                pkt.write_cmd(Command::GTTGMMapEntry).unwrap();
+                pkt.build_packet().unwrap();
+
+                let game_server = game_server_with_map.read().await;
+                let connection = game_server.get_connection();
+                let connection = connection.read().await;
+
+                connection.send_data(pkt).await.unwrap();
+            }
+        });
+    }
+
     pub async fn reject_connection(handler: Arc<RwLock<Self>>, reason: GameServerRejectionReason) {}
+
+    pub async fn is_connected(&self) -> bool {
+        let connection = self.connection.read().await;
+        connection.is_ready()
+    }
+
+    pub async fn send_packet(&self, packet: BasePacket) {
+        let connection = self.connection.read().await;
+        if connection.send_data(packet).await.is_err() {
+            connection
+                .logger
+                .error("Failed to send to GameServer, connection was closed");
+        }
+    }
 
     pub fn get_connection(&self) -> Arc<RwLock<TcpConnection<GameServer>>> {
         self.connection.clone()

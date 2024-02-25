@@ -26,11 +26,12 @@ use crate::{
     gate_server::{GateServer, SUPPORTED_CLIENT_VERSION},
     groupserver_handler::{self, GroupServerHandler},
     metrics::CONNECTIONS_COUNTER,
-    player::Player,
+    packets::gameserver::GameServerLeaveMapPacket,
+    player::{CurrentScreen, Player},
 };
 
 pub struct ClientHandler {
-    connection: Arc<Mutex<TcpConnection<Player>>>,
+    connection: Arc<RwLock<TcpConnection<Player>>>,
     gate_comm_tx: Option<mpsc::Sender<ClientGateCommands>>,
     groupserver_handler: Option<Arc<RwLock<GroupServerHandler>>>,
     gameserver_list: Arc<RwLock<GameServerList>>,
@@ -42,7 +43,7 @@ pub enum ClientGateCommands {
 
 impl ClientHandler {
     pub fn new(
-        connection: Arc<Mutex<TcpConnection<Player>>>,
+        connection: Arc<RwLock<TcpConnection<Player>>>,
         gameserver_list: Arc<RwLock<GameServerList>>,
     ) -> ClientHandler {
         ClientHandler {
@@ -53,7 +54,7 @@ impl ClientHandler {
         }
     }
 
-    pub fn get_connection(&self) -> Arc<Mutex<TcpConnection<Player>>> {
+    pub fn get_connection(&self) -> Arc<RwLock<TcpConnection<Player>>> {
         self.connection.clone()
     }
 
@@ -89,7 +90,7 @@ impl ClientHandler {
         tcp_connection.set_application_context(player);
 
         Arc::new(RwLock::new(ClientHandler::new(
-            Arc::new(Mutex::new(tcp_connection)),
+            Arc::new(RwLock::new(tcp_connection)),
             gameserver_list,
         )))
     }
@@ -117,7 +118,7 @@ impl ClientHandler {
         let client_connection = client_handler.connection.clone();
         let _send_tx_for_processor = _send_tx.clone();
         tokio::spawn(async move {
-            let mut connection = client_connection.lock().await;
+            let mut connection = client_connection.write().await;
             let application_context = connection.get_application_context();
             if application_context.is_none() {
                 return Err(anyhow::anyhow!("No application context").context("on_connected"));
@@ -144,7 +145,7 @@ impl ClientHandler {
                 readable_handler.on_data(packet);
             }
 
-            println!("Client channel closed");
+            readable_handler.handle_disconnect();
         });
 
         Ok(())
@@ -174,6 +175,10 @@ impl ClientHandler {
                 self.handle_select_character(packet);
             }
 
+            Some(Command::CTGPPing) => {
+                self.handle_group_ping(packet);
+            }
+
             Some(Command::None) => {
                 let raw_cmd = packet.get_raw_cmd();
                 if (1..=500).contains(&raw_cmd) {
@@ -191,26 +196,45 @@ impl ClientHandler {
             }
         }
     }
-
-    // fn on_error(&mut self, _stream: tokio::net::TcpListener, _error: &str) {
-    //     todo!()
-    // }
 }
 
 impl ClientHandler {
-    fn send_packet_to_gameserver(&self, mut packet: BasePacket) {
+    fn send_packet_to_gameserver(&self, packet: BasePacket) {
         let connection = self.connection.clone();
         tokio::spawn(async move {
-            let connection = connection.lock().await;
+            let connection = connection.read().await;
             let player = connection.get_application_context().unwrap();
+            packet.inspect_with_logger(&connection.logger);
 
+            let raw_cmd = packet.get_raw_cmd();
+
+            if raw_cmd != 17 {
+                connection.logger.debug("Got packet to send to GameServer");
+                packet.inspect_with_logger(&connection.logger);
+            }
+
+            // TODO: Handle spectating here
+
+            let mut pkt_to_send = packet.duplicate();
+            pkt_to_send.write_long(connection.get_id()).unwrap();
+            pkt_to_send.write_long(player.get_game_addr()).unwrap();
+
+            pkt_to_send.build_packet().unwrap();
             if let Some(game_server) = player.get_current_game_server() {
                 let game_server = game_server.read().await;
-                let connection = game_server.get_connection();
-                let connection = connection.read().await;
-                if connection.send_data(packet).await.is_err() {
-                    connection.logger.error(&format!(
-                        "Error sending packet to game server: {} for player: {}",
+                let game_server_connection = game_server.get_connection();
+                let game_server_connection = game_server_connection.read().await;
+
+                if let Err(err) = game_server_connection.send_data(pkt_to_send).await {
+                    game_server_connection.logger.error(&format!(
+                        "Error sending packet to game server: {} for player: {}, error - {:?}",
+                        connection.get_id(),
+                        player.get_login_id(),
+                        err
+                    ));
+                } else {
+                    game_server_connection.logger.debug(&format!(
+                        "Sent packet to game server: {} for player: {}",
                         connection.get_id(),
                         player.get_login_id()
                     ));
@@ -226,7 +250,7 @@ impl ClientHandler {
         // let gpserver_handler = self.groupserver_handler.unwrap().as_ref();
 
         tokio::spawn(async move {
-            let mut conn = connection.lock().await;
+            let mut conn = connection.write().await;
             conn.logger.debug("Handling user login");
             let application_context = conn.get_application_context();
 
@@ -379,14 +403,38 @@ impl ClientHandler {
 
     fn handle_user_logout(&self) {}
 
+    /*
+        This gets called whenever the client disconnects from the GateServer
+        That can be due to any reason, such as -
+        1. Client closes the game
+        2. Game crashes
+        3. Network issues between the client and the GateServer
+
+        When this happens, we need to do multiple things conditionally:
+
+        1. If the client had never "successfully" become active (i.e, never made a connection the GroupServer, never got authenticated),
+            then we don't need to do anything, we just disconnect the client
+        2. If the client had at least authenticated, then we need to let the GroupServer know that the client has disconnect so that
+            it can do its own clean-up.
+        3. If the client was in-game, then we ALSO will need to let their GameServer know that they have now been disconnected, so that
+            it can do its own clean-up.
+
+        In all the above scenarios, we also send a message back to the GateServer command listener, so that this client can be dropped from
+        the olist of active clients
+    */
     fn handle_disconnect(&self) {
         let connection = self.connection.clone();
         let gpserver_conn = self.groupserver_handler.clone().unwrap();
         let gate_comm_tx = self.gate_comm_tx.clone().unwrap();
+
         tokio::spawn(async move {
-            let mut conn = connection.lock().await;
-            let player = conn.get_application_context().unwrap();
+            let mut conn = connection.write().await;
+            let player_id = conn.get_id();
+            let logger = conn.logger.clone();
+            let player = conn.get_application_context_mut().unwrap();
+            logger.debug("Handling disconnection");
             if !player.is_active() {
+                logger.debug("Client was never active, disconnecting");
                 let mut err_pkt = BasePacket::new();
                 err_pkt.write_cmd(Command::None).unwrap();
                 err_pkt
@@ -395,6 +443,11 @@ impl ClientHandler {
 
                 conn.send_data(err_pkt).await.unwrap();
                 conn.close(Duration::from_millis(100)).await;
+
+                gate_comm_tx
+                    .send(ClientGateCommands::Disconnect(conn.get_id()))
+                    .await
+                    .unwrap();
                 return;
             }
 
@@ -407,11 +460,32 @@ impl ClientHandler {
             .unwrap();
 
             let gpserver = gpserver_conn.read().await;
-
+            logger.debug(
+                "Client had connection to GroupServer, sending packet to GroupServer to disconnect",
+            );
             gpserver.send_data(grp_disconnect_pkt).await.unwrap();
 
+            if player.is_in_game() {
+                if let Some(game_server_handler) = player.get_current_game_server() {
+                    let game_server_handler = game_server_handler.read().await;
+                    if game_server_handler.is_connected().await {
+                        let player_leave_map_pkt =
+                            GameServerLeaveMapPacket::new(0, player_id, player.get_game_addr())
+                                .to_base_packet()
+                                .unwrap();
+
+                        logger.debug(
+                            "Client was in-game, sending packet to GameServer to disconnect",
+                        );
+                        game_server_handler.send_packet(player_leave_map_pkt).await;
+                        player.unset_game_server();
+                    }
+                }
+            }
+
+            logger.debug("Disconnecting client");
             let grp_logout_pkt =
-                ClientLogoutFromGroupPacket::new(conn.get_id(), player.get_group_addr())
+                ClientLogoutFromGroupPacket::new(player_id, player.get_group_addr())
                     .to_base_packet()
                     .unwrap();
 
@@ -424,14 +498,14 @@ impl ClientHandler {
         });
     }
 
-    fn handle_select_character(&self, mut packet: BasePacket) {
-        /**
+    fn handle_select_character(&self, packet: BasePacket) {
+        /*
          * 1. Check if the player is on the character selection screen
          *  (is_active should be true)
          *  (group_addr should not be 0)
          *
          * 2. Make a sync RPC to the GroupServer
-         *    
+         *
          * 3. Extract data from response (map, world id etc)
          *
          * 4. If the map isnt found in any running game servers, send error
@@ -445,7 +519,7 @@ impl ClientHandler {
         let gameserver_list = self.gameserver_list.clone();
 
         tokio::spawn(async move {
-            let mut connection = connection.lock().await;
+            let mut connection = connection.write().await;
             let player = connection.get_application_context().unwrap();
             let mut begin_ply_pkt_for_group = packet.duplicate();
             let connection_id = connection.get_id();
@@ -528,10 +602,54 @@ impl ClientHandler {
                     garner_winner,
                 )
                 .await
-                {}
+                {
+                    player.set_current_screen(CurrentScreen::InGame);
+                }
             } else {
                 println!("Map not found for player, {}", player_map_name);
                 todo!("handle gameserver for map not found");
+            }
+        });
+    }
+
+    fn handle_group_ping(&self, _packet: BasePacket) {
+        let connection = self.connection.clone();
+        let group_connection = self.groupserver_handler.clone();
+        tokio::spawn(async move {
+            let connection = connection.read().await;
+            let player = connection.get_application_context().unwrap();
+            if player.get_group_addr() != 0 && player.get_game_addr() != 0 {
+                // GroupServer sends a ping packet to the client
+                // the client responds, and we forward it to the GroupServer
+                // with the time it took to respond
+
+                let duration_since_group_ping = player.get_last_group_pinged_time().elapsed();
+                let mut group_ping_pkt = BasePacket::new();
+                group_ping_pkt.write_cmd(Command::CTGPPing).unwrap();
+                group_ping_pkt
+                    .write_long(duration_since_group_ping.as_secs() as u32)
+                    .unwrap();
+                group_ping_pkt.write_long(connection.get_id()).unwrap();
+                group_ping_pkt.write_long(player.get_group_addr()).unwrap();
+                group_ping_pkt.build_packet().unwrap();
+
+                let group_connection = group_connection.unwrap();
+                let group_connection = group_connection.read().await;
+
+                if let Err(err) = group_connection.send_data(group_ping_pkt).await {
+                    connection.logger.error(&format!(
+                        "Error sending group ping packet to group server: {} for player: {}, error - {:?}",
+                        connection.get_id(),
+                        player.get_login_id(),
+                        err
+                    ));
+                } else {
+                    connection.logger.debug(&format!(
+                        "Sent group ping packet to group server: {} for player: {}",
+                        connection.get_id(),
+                        player.get_login_id()
+                    ));
+                }
             }
         });
     }
